@@ -63,10 +63,10 @@ impl Device {
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::NOOP,
             backend_options: BackendOptions {
-                noop: NoopBackendOptions { enable: true },
+                noop: NoopBackendOptions::enabled(),
                 ..Default::default()
             },
-            ..Default::default()
+            ..InstanceDescriptor::new_without_display_handle()
         });
 
         // Both of these futures are trivial and should complete instantaneously,
@@ -114,6 +114,11 @@ impl Device {
     #[must_use]
     pub fn limits(&self) -> Limits {
         self.inner.limits()
+    }
+
+    /// Get info about the adapter that this device was created from.
+    pub fn adapter_info(&self) -> AdapterInfo {
+        self.inner.adapter_info()
     }
 
     /// Creates a shader module.
@@ -305,28 +310,46 @@ impl Device {
     ///
     /// The type of `A::Texture` depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Texture")]
-    #[doc = crate::hal_type_metal!("Texture")]
-    #[doc = crate::hal_type_dx12!("Texture")]
-    #[doc = crate::hal_type_gles!("Texture")]
+    #[doc = crate::macros::hal_type_vulkan!("Texture")]
+    #[doc = crate::macros::hal_type_metal!("Texture")]
+    #[doc = crate::macros::hal_type_dx12!("Texture")]
+    #[doc = crate::macros::hal_type_gles!("Texture")]
+    ///
+    /// # `initial_state`
+    ///
+    /// If the resource has already been initialized, `initial_state` should be
+    /// set to the [`wgt::TextureUses`] state of the wrapped resource.  It will
+    /// be used as the source state (`oldLayout` / `StateBefore`) of the first
+    /// barrier emitted on the texture.
+    ///
+    /// If the resource has not been initialized (or if the existing contents
+    /// may be discarded), `initial_state` may be set to
+    /// `TextureUses::UNINITIALIZED`.
     ///
     /// # Safety
     ///
     /// - `hal_texture` must be created from this device internal handle
     /// - `hal_texture` must be created respecting `desc`
     /// - `hal_texture` must be initialized
+    /// - `initial_state`, if it is not `TextureUses::UNINITIALIZED`, must
+    ///   match the actual driver-side layout/state of the wrapped resource at
+    ///   the moment of wrap.
     #[cfg(wgpu_core)]
     #[must_use]
     pub unsafe fn create_texture_from_hal<A: hal::Api>(
         &self,
         hal_texture: A::Texture,
         desc: &TextureDescriptor<'_>,
+        initial_state: wgt::TextureUses,
     ) -> Texture {
         let texture = unsafe {
             let core_device = self.inner.as_core();
-            core_device
-                .context
-                .create_texture_from_hal::<A>(hal_texture, core_device, desc)
+            core_device.context.create_texture_from_hal::<A>(
+                hal_texture,
+                core_device,
+                desc,
+                initial_state,
+            )
         };
         Texture {
             inner: texture.into(),
@@ -358,10 +381,10 @@ impl Device {
     ///
     /// The type of `A::Buffer` depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Buffer")]
-    #[doc = crate::hal_type_metal!("Buffer")]
-    #[doc = crate::hal_type_dx12!("Buffer")]
-    #[doc = crate::hal_type_gles!("Buffer")]
+    #[doc = crate::macros::hal_type_vulkan!("Buffer")]
+    #[doc = crate::macros::hal_type_metal!("Buffer")]
+    #[doc = crate::macros::hal_type_dx12!("Buffer")]
+    #[doc = crate::macros::hal_type_gles!("Buffer")]
     ///
     /// # Safety
     ///
@@ -406,7 +429,11 @@ impl Device {
     #[must_use]
     pub fn create_query_set(&self, desc: &QuerySetDescriptor<'_>) -> QuerySet {
         let query_set = self.inner.create_query_set(desc);
-        QuerySet { inner: query_set }
+        QuerySet {
+            inner: query_set,
+            ty: desc.ty,
+            count: desc.count,
+        }
     }
 
     /// Set a callback which will be called for all errors that are not handled in error scopes.
@@ -550,10 +577,10 @@ impl Device {
     ///
     /// The returned type depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Device")]
-    #[doc = crate::hal_type_metal!("Device")]
-    #[doc = crate::hal_type_dx12!("Device")]
-    #[doc = crate::hal_type_gles!("Device")]
+    #[doc = crate::macros::hal_type_vulkan!("Device")]
+    #[doc = crate::macros::hal_type_metal!("Device")]
+    #[doc = crate::macros::hal_type_dx12!("Device")]
+    #[doc = crate::macros::hal_type_gles!("Device")]
     ///
     /// # Errors
     ///
@@ -695,6 +722,17 @@ impl Device {
 pub struct RequestDeviceError {
     pub(crate) inner: RequestDeviceErrorKind,
 }
+
+impl RequestDeviceError {
+    /// Construct an error from a custom backend message. This is mainly useful for custom backends.
+    #[cfg(custom)]
+    pub fn from_message(message: String) -> Self {
+        RequestDeviceError {
+            inner: RequestDeviceErrorKind::Custom(message),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum RequestDeviceErrorKind {
     /// Error from [`wgpu_core`].
@@ -707,6 +745,10 @@ pub(crate) enum RequestDeviceErrorKind {
     /// (This is currently never used by the webgl backend, but it could be.)
     #[cfg(webgpu)]
     WebGpu(String),
+
+    /// Error from a custom backend.
+    #[cfg(custom)]
+    Custom(String),
 }
 
 static_assertions::assert_impl_all!(RequestDeviceError: Send, Sync);
@@ -720,6 +762,8 @@ impl fmt::Display for RequestDeviceError {
             RequestDeviceErrorKind::WebGpu(error) => {
                 write!(_f, "{error}")
             }
+            #[cfg(custom)]
+            RequestDeviceErrorKind::Custom(msg) => write!(_f, "{msg}"),
             #[cfg(not(any(webgpu, wgpu_core)))]
             _ => unimplemented!("unknown `RequestDeviceErrorKind`"),
         }
@@ -733,6 +777,8 @@ impl error::Error for RequestDeviceError {
             RequestDeviceErrorKind::Core(error) => error.source(),
             #[cfg(webgpu)]
             RequestDeviceErrorKind::WebGpu(_) => None,
+            #[cfg(custom)]
+            RequestDeviceErrorKind::Custom(_) => None,
             #[cfg(not(any(webgpu, wgpu_core)))]
             _ => unimplemented!("unknown `RequestDeviceErrorKind`"),
         }
@@ -868,5 +914,21 @@ impl Drop for ErrorScopeGuard {
         if !self.popped {
             drop(self.device.pop_error_scope(self.index));
         }
+    }
+}
+
+impl fmt::Debug for ErrorScopeGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ErrorScopeGuard {
+            device,
+            index,
+            popped,
+            _phantom: _,
+        } = self;
+        f.debug_struct("ErrorScopeGuard")
+            .field("device", device)
+            .field("index", index)
+            .field("popped", popped)
+            .finish()
     }
 }

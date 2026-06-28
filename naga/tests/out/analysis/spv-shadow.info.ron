@@ -8,7 +8,7 @@
         ("CREATION_RESOLVED | ARGUMENT"),
         ("DATA | SIZED | COPY | IO_SHAREABLE | HOST_SHAREABLE | CREATION_RESOLVED | ARGUMENT | CONSTRUCTIBLE"),
         ("DATA | SIZED | COPY | IO_SHAREABLE | HOST_SHAREABLE | CREATION_RESOLVED | ARGUMENT | CONSTRUCTIBLE"),
-        ("DATA | SIZED | COPY | IO_SHAREABLE | HOST_SHAREABLE | CREATION_RESOLVED | ARGUMENT | CONSTRUCTIBLE"),
+        ("DATA | SIZED | COPY | HOST_SHAREABLE | CREATION_RESOLVED | ARGUMENT | CONSTRUCTIBLE"),
         ("DATA | SIZED | COPY | HOST_SHAREABLE | CREATION_RESOLVED | ARGUMENT | CONSTRUCTIBLE"),
         ("DATA | SIZED | COPY | HOST_SHAREABLE | CREATION_RESOLVED | ARGUMENT | CONSTRUCTIBLE"),
         ("DATA | COPY | HOST_SHAREABLE | CREATION_RESOLVED"),
@@ -18,7 +18,7 @@
     functions: [
         (
             flags: ("EXPRESSIONS | BLOCKS | CONTROL_FLOW_UNIFORMITY | STRUCT_LAYOUTS | CONSTANTS | BINDINGS"),
-            available_stages: ("VERTEX | FRAGMENT | COMPUTE | MESH | TASK"),
+            available_stages: ("VERTEX | FRAGMENT | COMPUTE | MESH | TASK | RAY_GENERATION | ANY_HIT | CLOSEST_HIT | MISS"),
             uniformity: (
                 non_uniform_result: Some(1),
                 requirements: (""),
@@ -413,10 +413,11 @@
             sampling: [],
             dual_source_blending: false,
             diagnostic_filter_leaf: None,
+            immediate_slots_used: (0),
         ),
         (
             flags: ("EXPRESSIONS | BLOCKS | CONTROL_FLOW_UNIFORMITY | STRUCT_LAYOUTS | CONSTANTS | BINDINGS"),
-            available_stages: ("VERTEX | FRAGMENT | COMPUTE | MESH | TASK"),
+            available_stages: ("VERTEX | FRAGMENT | COMPUTE | MESH | TASK | RAY_GENERATION | ANY_HIT | CLOSEST_HIT | MISS"),
             uniformity: (
                 non_uniform_result: Some(1),
                 requirements: (""),
@@ -1591,12 +1592,13 @@
             sampling: [],
             dual_source_blending: false,
             diagnostic_filter_leaf: None,
+            immediate_slots_used: (0),
         ),
     ],
     entry_points: [
         (
             flags: ("EXPRESSIONS | BLOCKS | CONTROL_FLOW_UNIFORMITY | STRUCT_LAYOUTS | CONSTANTS | BINDINGS"),
-            available_stages: ("VERTEX | FRAGMENT | COMPUTE | MESH | TASK"),
+            available_stages: ("VERTEX | FRAGMENT | COMPUTE | MESH | TASK | RAY_GENERATION | ANY_HIT | CLOSEST_HIT | MISS"),
             uniformity: (
                 non_uniform_result: Some(1),
                 requirements: (""),
@@ -1685,6 +1687,7 @@
             sampling: [],
             dual_source_blending: false,
             diagnostic_filter_leaf: None,
+            immediate_slots_used: (0),
         ),
     ],
     const_expression_types: [

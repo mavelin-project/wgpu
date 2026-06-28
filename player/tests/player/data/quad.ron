@@ -15,7 +15,7 @@
                 label: None,
                 flags: (bits: 3),
             ),
-            data: "quad.wgsl",
+            data: File("quad.wgsl"),
         ),
         CreateTexture(PointerId(0x10), (
             label: Some("Output Texture"),
@@ -50,7 +50,7 @@
             immediate_size: 0,
         )),
         CreateGeneralRenderPipeline(
-            id: PointerId(0x10),
+            id: Some(PointerId(0x10)),
             desc: (
                 label: None,
                 layout: Some(PointerId(0x10)),

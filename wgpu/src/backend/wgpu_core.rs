@@ -21,7 +21,7 @@ use hashbrown::HashMap;
 use arrayvec::ArrayVec;
 use smallvec::SmallVec;
 use wgc::{
-    command::bundle_ffi::*, error::ContextErrorSource, pipeline::CreateShaderModuleError,
+    error::ContextErrorSource, pipeline::CreateShaderModuleError,
     resource::BlasPrepareCompactResult,
 };
 use wgt::{
@@ -34,7 +34,7 @@ use crate::{
     dispatch::{self, BlasCompactCallback, BufferMappedRangeInterface},
     BindingResource, Blas, BufferBinding, BufferDescriptor, CompilationInfo, CompilationMessage,
     CompilationMessageType, ErrorSource, Features, Label, LoadOp, MapMode, Operations,
-    ShaderSource, SurfaceTargetUnsafe, TextureDescriptor, Tlas,
+    ShaderSource, SurfaceTargetUnsafe, TextureDescriptor, Tlas, WriteOnly,
 };
 use crate::{dispatch::DispatchAdapter, util::Mutex};
 
@@ -80,7 +80,8 @@ impl ContextWgpuCore {
 
     #[cfg(wgpu_core)]
     pub fn enumerate_adapters(&self, backends: wgt::Backends) -> Vec<wgc::id::AdapterId> {
-        self.0.enumerate_adapters(backends)
+        self.0
+            .enumerate_adapters(backends, false /* no limit bucketing */)
     }
 
     pub unsafe fn create_adapter_from_hal<A: hal::Api>(
@@ -110,15 +111,6 @@ impl ContextWgpuCore {
         hal_device: hal::OpenDevice<A>,
         desc: &crate::DeviceDescriptor<'_>,
     ) -> Result<(CoreDevice, CoreQueue), crate::RequestDeviceError> {
-        if !matches!(desc.trace, wgt::Trace::Off) {
-            log::error!(
-                "
-                Feature 'trace' has been removed temporarily; \
-                see https://github.com/gfx-rs/wgpu/issues/5974. \
-                The `trace` parameter will have no effect."
-            );
-        }
-
         let (device_id, queue_id) = unsafe {
             self.0.create_device_from_hal(
                 adapter.id,
@@ -148,11 +140,17 @@ impl ContextWgpuCore {
         hal_texture: A::Texture,
         device: &CoreDevice,
         desc: &TextureDescriptor<'_>,
+        initial_state: wgt::TextureUses,
     ) -> CoreTexture {
         let descriptor = desc.map_label_and_view_formats(|l| l.map(Borrowed), |v| v.to_vec());
         let (id, error) = unsafe {
-            self.0
-                .create_texture_from_hal(Box::new(hal_texture), device.id, &descriptor, None)
+            self.0.create_texture_from_hal(
+                Box::new(hal_texture),
+                device.id,
+                &descriptor,
+                initial_state,
+                None,
+            )
         };
         if let Some(cause) = error {
             self.handle_error(
@@ -550,7 +548,7 @@ pub struct CoreCommandBuffer {
 #[derive(Debug)]
 pub struct CoreRenderBundleEncoder {
     pub(crate) context: ContextWgpuCore,
-    encoder: wgc::command::RenderBundleEncoder,
+    encoder: Box<wgc::command::RenderBundleEncoder>,
     id: crate::cmp::Identifier,
 }
 
@@ -800,7 +798,7 @@ impl dispatch::InstanceInterface for ContextWgpuCore {
                     .instance_create_surface(raw_display_handle, raw_window_handle, None)
             },
 
-            #[cfg(all(unix, not(target_vendor = "apple"), not(target_family = "wasm")))]
+            #[cfg(all(drm, not(target_os = "netbsd")))]
             SurfaceTargetUnsafe::Drm {
                 fd,
                 plane,
@@ -824,6 +822,11 @@ impl dispatch::InstanceInterface for ContextWgpuCore {
             SurfaceTargetUnsafe::CoreAnimationLayer(layer) => unsafe {
                 self.0.instance_create_surface_metal(layer, None)
             },
+
+            #[cfg(all(drm, target_os = "netbsd"))]
+            SurfaceTargetUnsafe::Drm { .. } => Err(
+                wgc::instance::CreateSurfaceError::BackendNotEnabled(wgt::Backend::Vulkan),
+            ),
 
             #[cfg(dx12)]
             SurfaceTargetUnsafe::CompositionVisual(visual) => unsafe {
@@ -863,6 +866,7 @@ impl dispatch::InstanceInterface for ContextWgpuCore {
                 compatible_surface: options
                     .compatible_surface
                     .map(|surface| surface.inner.as_core().id),
+                apply_limit_buckets: false,
             },
             wgt::Backends::all(),
             None,
@@ -930,15 +934,6 @@ impl dispatch::AdapterInterface for CoreAdapter {
         &self,
         desc: &crate::DeviceDescriptor<'_>,
     ) -> Pin<Box<dyn dispatch::RequestDeviceFuture>> {
-        if !matches!(desc.trace, wgt::Trace::Off) {
-            log::error!(
-                "
-                Feature 'trace' has been removed temporarily; \
-                see https://github.com/gfx-rs/wgpu/issues/5974. \
-                The `trace` parameter will have no effect."
-            );
-        }
-
         let res = self.context.0.adapter_request_device(
             self.id,
             &desc.map_label(|l| l.map(Borrowed)),
@@ -1023,6 +1018,10 @@ impl dispatch::DeviceInterface for CoreDevice {
 
     fn limits(&self) -> crate::Limits {
         self.context.0.device_limits(self.id)
+    }
+
+    fn adapter_info(&self) -> crate::AdapterInfo {
+        self.context.0.device_adapter_info(self.id)
     }
 
     // If we have no way to create a shader module, we can't return one, and so most of the function is unreachable.
@@ -1197,6 +1196,21 @@ impl dispatch::DeviceInterface for CoreDevice {
         }
         let mut remaining_arrayed_buffer_bindings = &arrayed_buffer_bindings[..];
 
+        let mut arrayed_acceleration_structures = Vec::new();
+        if self
+            .features
+            .contains(Features::ACCELERATION_STRUCTURE_BINDING_ARRAY)
+        {
+            // Gather all the TLAS IDs used by TLAS arrays first (same pattern as other arrayed resources).
+            for entry in desc.entries.iter() {
+                if let BindingResource::AccelerationStructureArray(array) = entry.resource {
+                    arrayed_acceleration_structures
+                        .extend(array.iter().map(|tlas| tlas.inner.as_core().id));
+                }
+            }
+        }
+        let mut remaining_arrayed_acceleration_structures = &arrayed_acceleration_structures[..];
+
         let entries = desc
             .entries
             .iter()
@@ -1239,6 +1253,12 @@ impl dispatch::DeviceInterface for CoreDevice {
                         bm::BindingResource::AccelerationStructure(
                             acceleration_structure.inner.as_core().id,
                         )
+                    }
+                    BindingResource::AccelerationStructureArray(array) => {
+                        let slice = &remaining_arrayed_acceleration_structures[..array.len()];
+                        remaining_arrayed_acceleration_structures =
+                            &remaining_arrayed_acceleration_structures[array.len()..];
+                        bm::BindingResource::AccelerationStructureArray(Borrowed(slice))
                     }
                     BindingResource::ExternalTexture(external_texture) => {
                         bm::BindingResource::ExternalTexture(external_texture.inner.as_core().id)
@@ -1287,7 +1307,7 @@ impl dispatch::DeviceInterface for CoreDevice {
         let temp_layouts = desc
             .bind_group_layouts
             .iter()
-            .map(|bgl| bgl.inner.as_core().id)
+            .map(|bgl| bgl.map(|bgl| bgl.inner.as_core().id))
             .collect::<ArrayVec<_, { wgc::MAX_BIND_GROUPS }>>();
         let descriptor = wgc::binding_model::PipelineLayoutDescriptor {
             label: desc.label.map(Borrowed),
@@ -1324,10 +1344,12 @@ impl dispatch::DeviceInterface for CoreDevice {
             .vertex
             .buffers
             .iter()
-            .map(|vbuf| pipe::VertexBufferLayout {
-                array_stride: vbuf.array_stride,
-                step_mode: vbuf.step_mode,
-                attributes: Borrowed(vbuf.attributes),
+            .map(|vbuf| {
+                vbuf.as_ref().map(|vbuf| pipe::VertexBufferLayout {
+                    array_stride: vbuf.array_stride,
+                    step_mode: vbuf.step_mode,
+                    attributes: Borrowed(vbuf.attributes),
+                })
             })
             .collect();
 
@@ -1788,10 +1810,18 @@ impl dispatch::DeviceInterface for CoreDevice {
             sample_count: desc.sample_count,
             multiview: desc.multiview,
         };
-        let encoder = match wgc::command::RenderBundleEncoder::new(&descriptor, self.id) {
-            Ok(encoder) => encoder,
-            Err(e) => panic!("Error in Device::create_render_bundle_encoder: {e}"),
-        };
+        let (encoder, error) = self
+            .context
+            .0
+            .device_create_render_bundle_encoder(self.id, &descriptor);
+        if let Some(cause) = error {
+            self.context.handle_error(
+                &self.error_sink,
+                cause,
+                desc.label,
+                "Device::create_render_bundle_encoder",
+            );
+        }
 
         CoreRenderBundleEncoder {
             context: self.context.clone(),
@@ -2120,6 +2150,17 @@ impl dispatch::QueueInterface for CoreQueue {
             .into(),
         )
     }
+
+    fn present(&self, detail: &dispatch::DispatchSurfaceOutputDetail) {
+        let detail = detail.as_core();
+        match self.context.0.surface_present(detail.surface_id) {
+            Ok(_status) => (),
+            Err(err) => {
+                self.context
+                    .handle_error_nolabel(&self.error_sink, err, "Queue::present");
+            }
+        }
+    }
 }
 
 impl Drop for CoreQueue {
@@ -2160,8 +2201,7 @@ impl dispatch::TextureViewInterface for CoreTextureView {}
 
 impl Drop for CoreTextureView {
     fn drop(&mut self) {
-        // TODO: We don't use this error at all?
-        let _ = self.context.0.texture_view_drop(self.id);
+        self.context.0.texture_view_drop(self.id);
     }
 }
 
@@ -2220,22 +2260,19 @@ impl dispatch::BufferInterface for CoreBuffer {
     fn get_mapped_range(
         &self,
         sub_range: Range<crate::BufferAddress>,
-    ) -> dispatch::DispatchBufferMappedRange {
+    ) -> Result<dispatch::DispatchBufferMappedRange, crate::MapRangeError> {
         let size = sub_range.end - sub_range.start;
-        match self
-            .context
+        self.context
             .0
             .buffer_get_mapped_range(self.id, sub_range.start, Some(size))
-        {
-            Ok((ptr, size)) => CoreBufferMappedRange {
-                ptr,
-                size: size as usize,
-            }
-            .into(),
-            Err(err) => self
-                .context
-                .handle_error_fatal(err, "Buffer::get_mapped_range"),
-        }
+            .map(|(ptr, size)| {
+                CoreBufferMappedRange {
+                    ptr,
+                    size: size as usize,
+                }
+                .into()
+            })
+            .map_err(|err| crate::MapRangeError(self.context.format_error(&err)))
     }
 
     fn unmap(&self) {
@@ -2351,7 +2388,11 @@ impl Drop for CoreTlas {
     }
 }
 
-impl dispatch::QuerySetInterface for CoreQuerySet {}
+impl dispatch::QuerySetInterface for CoreQuerySet {
+    fn destroy(&self) {
+        self.context.0.query_set_destroy(self.id);
+    }
+}
 
 impl Drop for CoreQuerySet {
     fn drop(&mut self) {
@@ -2600,9 +2641,9 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
             self.id,
             &wgc::command::RenderPassDescriptor {
                 label: desc.label.map(Borrowed),
-                timestamp_writes: timestamp_writes.as_ref(),
+                timestamp_writes,
                 color_attachments: Borrowed(&colors),
-                depth_stencil_attachment: depth_stencil.as_ref(),
+                depth_stencil_attachment: depth_stencil,
                 occlusion_query_set: desc.occlusion_query_set.map(|qs| qs.inner.as_core().id),
                 multiview_mask: desc.multiview_mask,
             },
@@ -2810,6 +2851,18 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
                         }
                     });
                     wgc::ray_tracing::BlasGeometries::TriangleGeometries(Box::new(iter))
+                }
+                crate::BlasGeometries::AabbGeometries(ref aabb_geometries) => {
+                    let iter =
+                        aabb_geometries
+                            .iter()
+                            .map(|ag| wgc::ray_tracing::BlasAabbGeometry {
+                                aabb_buffer: ag.aabb_buffer.inner.as_core().id,
+                                stride: ag.stride,
+                                size: ag.size,
+                                primitive_offset: ag.primitive_offset,
+                            });
+                    wgc::ray_tracing::BlasGeometries::AabbGeometries(Box::new(iter))
                 }
             };
             wgc::ray_tracing::BlasBuildEntry {
@@ -3083,7 +3136,41 @@ impl dispatch::ComputePassInterface for CoreComputePass {
         }
     }
 
-    fn end(&mut self) {
+    fn transition_resources<'a>(
+        &mut self,
+        buffer_transitions: &mut dyn Iterator<
+            Item = wgt::BufferTransition<&'a dispatch::DispatchBuffer>,
+        >,
+        texture_transitions: &mut dyn Iterator<
+            Item = wgt::TextureTransition<&'a dispatch::DispatchTextureView>,
+        >,
+    ) {
+        let result = self.context.0.compute_pass_transition_resources(
+            &mut self.pass,
+            buffer_transitions.map(|t| wgt::BufferTransition {
+                buffer: t.buffer.as_core().id,
+                state: t.state,
+            }),
+            texture_transitions.map(|t| wgt::TextureTransition {
+                texture: t.texture.as_core().id,
+                selector: t.selector.clone(),
+                state: t.state,
+            }),
+        );
+
+        if let Err(cause) = result {
+            self.context.handle_error(
+                &self.error_sink,
+                cause,
+                self.pass.label(),
+                "ComputePass::transition_resources",
+            );
+        }
+    }
+}
+
+impl Drop for CoreComputePass {
+    fn drop(&mut self) {
         if let Err(cause) = self.context.0.compute_pass_end(&mut self.pass) {
             self.context.handle_error(
                 &self.error_sink,
@@ -3092,12 +3179,6 @@ impl dispatch::ComputePassInterface for CoreComputePass {
                 "ComputePass::end",
             );
         }
-    }
-}
-
-impl Drop for CoreComputePass {
-    fn drop(&mut self) {
-        dispatch::ComputePassInterface::end(self);
     }
 }
 
@@ -3169,19 +3250,17 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
     fn set_vertex_buffer(
         &mut self,
         slot: u32,
-        buffer: &dispatch::DispatchBuffer,
+        buffer: Option<&dispatch::DispatchBuffer>,
         offset: crate::BufferAddress,
         size: Option<crate::BufferSize>,
     ) {
-        let buffer = buffer.as_core();
+        let buffer = buffer.map(|buffer| buffer.as_core().id);
 
-        if let Err(cause) = self.context.0.render_pass_set_vertex_buffer(
-            &mut self.pass,
-            slot,
-            buffer.id,
-            offset,
-            size,
-        ) {
+        if let Err(cause) =
+            self.context
+                .0
+                .render_pass_set_vertex_buffer(&mut self.pass, slot, buffer, offset, size)
+        {
             self.context.handle_error(
                 &self.error_sink,
                 cause,
@@ -3697,8 +3776,10 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
             );
         }
     }
+}
 
-    fn end(&mut self) {
+impl Drop for CoreRenderPass {
+    fn drop(&mut self) {
         if let Err(cause) = self.context.0.render_pass_end(&mut self.pass) {
             self.context.handle_error(
                 &self.error_sink,
@@ -3710,17 +3791,13 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
     }
 }
 
-impl Drop for CoreRenderPass {
-    fn drop(&mut self) {
-        dispatch::RenderPassInterface::end(self);
-    }
-}
-
 impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
         let pipeline = pipeline.as_core();
 
-        wgpu_render_bundle_set_pipeline(&mut self.encoder, pipeline.id)
+        self.context
+            .0
+            .render_bundle_encoder_set_pipeline(&mut self.encoder, pipeline.id);
     }
 
     fn set_bind_group(
@@ -3731,15 +3808,9 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let bg = bind_group.map(|bg| bg.as_core().id);
 
-        unsafe {
-            wgpu_render_bundle_set_bind_group(
-                &mut self.encoder,
-                index,
-                bg,
-                offsets.as_ptr(),
-                offsets.len(),
-            )
-        }
+        self.context
+            .0
+            .render_bundle_encoder_set_bind_group(&mut self.encoder, index, bg, offsets)
     }
 
     fn set_index_buffer(
@@ -3751,52 +3822,58 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let buffer = buffer.as_core();
 
-        self.encoder
-            .set_index_buffer(buffer.id, index_format, offset, size)
+        self.context.0.render_bundle_encoder_set_index_buffer(
+            &mut self.encoder,
+            buffer.id,
+            index_format,
+            offset,
+            size,
+        );
     }
 
     fn set_vertex_buffer(
         &mut self,
         slot: u32,
-        buffer: &dispatch::DispatchBuffer,
+        buffer: Option<&dispatch::DispatchBuffer>,
         offset: crate::BufferAddress,
         size: Option<crate::BufferSize>,
     ) {
-        let buffer = buffer.as_core();
+        let buffer = buffer.map(|buffer| buffer.as_core().id);
 
-        wgpu_render_bundle_set_vertex_buffer(&mut self.encoder, slot, buffer.id, offset, size)
+        self.context.0.render_bundle_encoder_set_vertex_buffer(
+            &mut self.encoder,
+            slot,
+            buffer,
+            offset,
+            size,
+        );
     }
 
     fn set_immediates(&mut self, offset: u32, data: &[u8]) {
-        unsafe {
-            wgpu_render_bundle_set_immediates(
-                &mut self.encoder,
-                offset,
-                data.len().try_into().unwrap(),
-                data.as_ptr(),
-            )
-        }
+        self.context
+            .0
+            .render_bundle_encoder_set_immediates(&mut self.encoder, offset, data);
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        wgpu_render_bundle_draw(
+        self.context.0.render_bundle_encoder_draw(
             &mut self.encoder,
             vertices.end - vertices.start,
             instances.end - instances.start,
             vertices.start,
             instances.start,
-        )
+        );
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        wgpu_render_bundle_draw_indexed(
+        self.context.0.render_bundle_encoder_draw_indexed(
             &mut self.encoder,
             indices.end - indices.start,
             instances.end - instances.start,
             indices.start,
             base_vertex,
             instances.start,
-        )
+        );
     }
 
     fn draw_indirect(
@@ -3806,7 +3883,11 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let indirect_buffer = indirect_buffer.as_core();
 
-        wgpu_render_bundle_draw_indirect(&mut self.encoder, indirect_buffer.id, indirect_offset)
+        self.context.0.render_bundle_encoder_draw_indirect(
+            &mut self.encoder,
+            indirect_buffer.id,
+            indirect_offset,
+        )
     }
 
     fn draw_indexed_indirect(
@@ -3816,7 +3897,7 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let indirect_buffer = indirect_buffer.as_core();
 
-        wgpu_render_bundle_draw_indexed_indirect(
+        self.context.0.render_bundle_encoder_draw_indexed_indirect(
             &mut self.encoder,
             indirect_buffer.id,
             indirect_offset,
@@ -3841,6 +3922,14 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
             id,
         }
         .into()
+    }
+
+    #[cfg(custom)]
+    fn finish_boxed(
+        self: Box<Self>,
+        desc: &crate::RenderBundleDescriptor<'_>,
+    ) -> dispatch::DispatchRenderBundle {
+        (*self).finish(desc)
     }
 }
 
@@ -3919,7 +4008,7 @@ impl dispatch::SurfaceInterface for CoreSurface {
                             err,
                             "Surface::get_current_texture_view",
                         );
-                        (None, crate::SurfaceStatus::Unknown, output_detail)
+                        (None, crate::SurfaceStatus::Validation, output_detail)
                     }
                     None => self
                         .context
@@ -3937,22 +4026,23 @@ impl Drop for CoreSurface {
 }
 
 impl dispatch::SurfaceOutputDetailInterface for CoreSurfaceOutputDetail {
-    fn present(&self) {
-        match self.context.0.surface_present(self.surface_id) {
+    fn texture_discard(&self) {
+        match self.context.0.surface_texture_discard(self.surface_id) {
             Ok(_status) => (),
             Err(err) => {
                 self.context
-                    .handle_error_nolabel(&self.error_sink, err, "Surface::present");
+                    .handle_error_nolabel(&self.error_sink, err, "Surface::discard_texture")
             }
         }
     }
 
-    fn texture_discard(&self) {
-        match self.context.0.surface_texture_discard(self.surface_id) {
+    fn texture_release(&self) {
+        match self.context.0.surface_texture_release(self.surface_id) {
             Ok(_status) => (),
-            Err(err) => self
-                .context
-                .handle_error_fatal(err, "Surface::discard_texture"),
+            Err(err) => {
+                self.context
+                    .handle_error_nolabel(&self.error_sink, err, "Surface::release_texture")
+            }
         }
     }
 }
@@ -3965,13 +4055,14 @@ impl Drop for CoreSurfaceOutputDetail {
 }
 
 impl dispatch::QueueWriteBufferInterface for CoreQueueWriteBuffer {
-    fn slice(&self) -> &[u8] {
-        panic!()
+    #[inline]
+    fn len(&self) -> usize {
+        self.mapping.len()
     }
 
     #[inline]
-    fn slice_mut(&mut self) -> &mut [u8] {
-        self.mapping.slice_mut()
+    unsafe fn write_slice(&mut self) -> WriteOnly<'_, [u8]> {
+        unsafe { self.mapping.write_slice() }
     }
 }
 impl Drop for CoreQueueWriteBuffer {
@@ -3984,13 +4075,18 @@ impl Drop for CoreQueueWriteBuffer {
 
 impl dispatch::BufferMappedRangeInterface for CoreBufferMappedRange {
     #[inline]
-    fn slice(&self) -> &[u8] {
+    fn len(&self) -> usize {
+        self.size
+    }
+
+    #[inline]
+    unsafe fn read_slice(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
     }
 
     #[inline]
-    fn slice_mut(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
+    unsafe fn write_slice(&mut self) -> WriteOnly<'_, [u8]> {
+        unsafe { WriteOnly::new(NonNull::slice_from_raw_parts(self.ptr, self.size)) }
     }
 
     #[cfg(webgpu)]

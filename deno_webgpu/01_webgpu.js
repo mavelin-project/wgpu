@@ -36,6 +36,7 @@ import {
   GPUTexture,
   GPUTextureView,
   GPUExternalTexture,
+  WGSLLanguageFeatures,
   op_create_gpu,
   op_webgpu_device_start_capture,
   op_webgpu_device_stop_capture,
@@ -238,6 +239,21 @@ ObjectDefineProperty(GPUSupportedFeaturesPrototype, privateCustomInspect, {
   },
 });
 
+const WGSLLanguageFeaturesPrototype = WGSLLanguageFeatures.prototype;
+webidl.setlikeObjectWrap(WGSLLanguageFeaturesPrototype, true);
+ObjectDefineProperty(WGSLLanguageFeaturesPrototype, privateCustomInspect, {
+  __proto__: null,
+  value(inspect, inspectOptions) {
+    if (ObjectPrototypeIsPrototypeOf(WGSLLanguageFeaturesPrototype, this)) {
+      return `${this.constructor.name} ${
+        // deno-lint-ignore prefer-primordials
+        inspect([...this], inspectOptions)}`;
+    } else {
+      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+    }
+  },
+});
+
 const GPUSupportedLimitsPrototype = GPUSupportedLimits.prototype;
 ObjectDefineProperty(GPUSupportedLimitsPrototype, privateCustomInspect, {
   __proto__: null,
@@ -255,8 +271,7 @@ ObjectDefineProperty(GPUSupportedLimitsPrototype, privateCustomInspect, {
           "maxTextureDimension3D",
           "maxTextureArrayLayers",
           "maxBindGroups",
-          // TODO(@crowlKats): support max_bind_groups_plus_vertex_buffers
-          // "maxBindGroupsPlusVertexBuffers",
+          "maxBindGroupsPlusVertexBuffers",
           "maxBindingsPerBindGroup",
           "maxDynamicUniformBuffersPerPipelineLayout",
           "maxDynamicStorageBuffersPerPipelineLayout",
@@ -466,6 +481,9 @@ class GPUTextureUsage {
   }
   static get RENDER_ATTACHMENT() {
     return 0x10;
+  }
+  static get TRANSIENT_ATTACHMENT() {
+    return 0x20;
   }
 }
 
@@ -919,6 +937,7 @@ export {
   GPUInternalError,
   GPUMapMode,
   GPUOutOfMemoryError,
+  GPUPipelineError,
   GPUPipelineLayout,
   GPUQuerySet,
   GPUQueue,
@@ -937,5 +956,6 @@ export {
   GPUExternalTexture,
   GPUUncapturedErrorEvent,
   GPUValidationError,
+  WGSLLanguageFeatures,
   initGPU,
 };

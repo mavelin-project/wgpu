@@ -47,7 +47,8 @@ impl Default for Instance {
     /// If no backend feature for the active target platform is enabled,
     /// this method will panic, see [`Instance::enabled_backend_features()`].
     fn default() -> Self {
-        Self::new(InstanceDescriptor::default())
+        // TODO: Differentiate constructors here too?
+        Self::new(InstanceDescriptor::new_without_display_handle())
     }
 }
 
@@ -176,7 +177,7 @@ impl Instance {
     /// Internally, this creates surfaces for all backends that are enabled for this instance.
     ///
     /// See [`SurfaceTarget`] for what targets are supported.
-    /// See [`Instance::create_surface_unsafe`] for surface creation with unsafe target variants.
+    /// See [`Instance::create_surface_unsafe()`] for surface creation with unsafe target variants.
     ///
     /// Most commonly used are window handles (or provider of windows handles)
     /// which can be passed directly as they're automatically converted to [`SurfaceTarget`].
@@ -199,7 +200,20 @@ impl Instance {
 
                 surface
             }?,
+            SurfaceTarget::DisplayAndWindow(display_and_window_handle) => unsafe {
+                let surface = self.create_surface_unsafe(
+                    SurfaceTargetUnsafe::from_display_and_window(
+                        &display_and_window_handle,
+                        &display_and_window_handle,
+                    )
+                    .map_err(|e| CreateSurfaceError {
+                        inner: CreateSurfaceErrorKind::RawHandle(e),
+                    })?,
+                );
+                handle_source = Some(display_and_window_handle);
 
+                surface
+            }?,
             #[cfg(web)]
             SurfaceTarget::Canvas(canvas) => {
                 handle_source = None;
@@ -213,12 +227,11 @@ impl Instance {
                 // This is safe without storing canvas to `handle_origin` since the surface will create a copy internally.
                 unsafe {
                     self.create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle,
+                        raw_display_handle: Some(raw_display_handle),
                         raw_window_handle,
                     })
                 }?
             }
-
             #[cfg(web)]
             SurfaceTarget::OffscreenCanvas(canvas) => {
                 handle_source = None;
@@ -233,7 +246,7 @@ impl Instance {
                 // This is safe without storing canvas to `handle_origin` since the surface will create a copy internally.
                 unsafe {
                     self.create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle,
+                        raw_display_handle: Some(raw_display_handle),
                         raw_window_handle,
                     })
                 }?
@@ -309,10 +322,10 @@ impl Instance {
     ///
     /// The type of `A::Instance` depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Instance")]
-    #[doc = crate::hal_type_metal!("Instance")]
-    #[doc = crate::hal_type_dx12!("Instance")]
-    #[doc = crate::hal_type_gles!("Instance")]
+    #[doc = crate::macros::hal_type_vulkan!("Instance")]
+    #[doc = crate::macros::hal_type_metal!("Instance")]
+    #[doc = crate::macros::hal_type_dx12!("Instance")]
+    #[doc = crate::macros::hal_type_gles!("Instance")]
     ///
     /// # Safety
     ///
@@ -337,10 +350,10 @@ impl Instance {
     ///
     /// # Types
     ///
-    #[doc = crate::hal_type_vulkan!("Instance")]
-    #[doc = crate::hal_type_metal!("Instance")]
-    #[doc = crate::hal_type_dx12!("Instance")]
-    #[doc = crate::hal_type_gles!("Instance")]
+    #[doc = crate::macros::hal_type_vulkan!("Instance")]
+    #[doc = crate::macros::hal_type_metal!("Instance")]
+    #[doc = crate::macros::hal_type_dx12!("Instance")]
+    #[doc = crate::macros::hal_type_gles!("Instance")]
     ///
     /// # Errors
     ///
@@ -368,10 +381,10 @@ impl Instance {
     ///
     /// The type of `hal_adapter.adapter` depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Adapter")]
-    #[doc = crate::hal_type_metal!("Adapter")]
-    #[doc = crate::hal_type_dx12!("Adapter")]
-    #[doc = crate::hal_type_gles!("Adapter")]
+    #[doc = crate::macros::hal_type_vulkan!("Adapter")]
+    #[doc = crate::macros::hal_type_metal!("Adapter")]
+    #[doc = crate::macros::hal_type_dx12!("Adapter")]
+    #[doc = crate::macros::hal_type_gles!("Adapter")]
     ///
     /// # Safety
     ///

@@ -5,6 +5,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::fmt;
 use std::sync::mpsc;
+use wgt::Features;
 
 use crate::COPY_BUFFER_ALIGNMENT;
 
@@ -22,10 +23,19 @@ use crate::COPY_BUFFER_ALIGNMENT;
 /// 3. Submit all command encoders that were used in step 1.
 /// 4. Call [`StagingBelt::recall()`].
 ///
+/// Alternatively, steps 2 and 4 can be combined into a single call to
+/// [`StagingBelt::finish_and_recall_on_submit()`], which schedules the re-map
+/// automatically when the encoder is submitted, so no explicit `recall()` is needed.
+///
 /// [`Queue::write_buffer_with()`]: crate::Queue::write_buffer_with
 pub struct StagingBelt {
     device: Device,
     chunk_size: BufferAddress,
+    /// User-specified [`BufferUsages`] used to create the chunk buffers are created.
+    ///
+    /// [`new`](Self::new) guarantees that this always contains
+    /// [`MAP_WRITE`](BufferUsages::MAP_WRITE).
+    buffer_usages: BufferUsages,
     /// Chunks into which we are accumulating data to be transferred.
     active_chunks: Vec<Chunk>,
     /// Chunks that have scheduled transfers already; they are unmapped and some
@@ -51,11 +61,56 @@ impl StagingBelt {
     /// * 1-4 times less than the total amount of data uploaded per submission
     ///   (per [`StagingBelt::finish()`]); and
     /// * bigger is better, within these bounds.
+    ///
+    /// The buffers returned by this [`StagingBelt`] will be have the buffer usages
+    /// [`COPY_SRC | MAP_WRITE`](crate::BufferUsages)
     pub fn new(device: Device, chunk_size: BufferAddress) -> Self {
+        Self::new_with_buffer_usages(device, chunk_size, BufferUsages::COPY_SRC)
+    }
+
+    /// Create a new staging belt.
+    ///
+    /// The `chunk_size` is the unit of internal buffer allocation; writes will be
+    /// sub-allocated within each chunk. Therefore, for optimal use of memory, the
+    /// chunk size should be:
+    ///
+    /// * larger than the largest single [`StagingBelt::write_buffer()`] operation;
+    /// * 1-4 times less than the total amount of data uploaded per submission
+    ///   (per [`StagingBelt::finish()`]); and
+    /// * bigger is better, within these bounds.
+    ///
+    /// `buffer_usages` specifies the [`BufferUsages`] the staging buffers
+    /// will be created with. [`MAP_WRITE`](BufferUsages::MAP_WRITE) will be added
+    /// automatically. The method will panic if the combination of usages is not
+    /// supported. Because [`MAP_WRITE`](BufferUsages::MAP_WRITE) is implied, the allowed usages
+    /// depends on if [`Features::MAPPABLE_PRIMARY_BUFFERS`] is enabled.
+    /// - If enabled: any usage is valid.
+    /// - If disabled: only [`COPY_SRC`](BufferUsages::COPY_SRC) can be used.
+    #[track_caller]
+    pub fn new_with_buffer_usages(
+        device: Device,
+        chunk_size: BufferAddress,
+        mut buffer_usages: BufferUsages,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
+
+        // make sure anything other than MAP_WRITE | COPY_SRC is only allowed with MAPPABLE_PRIMARY_BUFFERS.
+        let extra_usages =
+            buffer_usages.difference(BufferUsages::MAP_WRITE | BufferUsages::COPY_SRC);
+        if !extra_usages.is_empty()
+            && !device
+                .features()
+                .contains(Features::MAPPABLE_PRIMARY_BUFFERS)
+        {
+            panic!("Only BufferUsages::COPY_SRC may be used when Features::MAPPABLE_PRIMARY_BUFFERS is not enabled. Specified buffer usages: {buffer_usages:?}");
+        }
+        // always set MAP_WRITE
+        buffer_usages.insert(BufferUsages::MAP_WRITE);
+
         StagingBelt {
             device,
             chunk_size,
+            buffer_usages,
             active_chunks: Vec::new(),
             closed_chunks: Vec::new(),
             free_chunks: Vec::new(),
@@ -104,7 +159,9 @@ impl StagingBelt {
             offset,
             size.get(),
         );
-        slice_of_belt.get_mapped_range_mut()
+        slice_of_belt
+            .get_mapped_range_mut()
+            .expect("Failed to get mapped range for staging belt buffer")
     }
 
     /// Allocate a staging belt slice with the given `size` and `alignment` and return it.
@@ -117,7 +174,7 @@ impl StagingBelt {
     /// (The view must be dropped before [`StagingBelt::finish()`] is called.)
     ///
     /// You can then record your own GPU commands to perform with the slice,
-    /// such as copying it to a texture or executing a compute shader that reads it (whereas
+    /// such as copying it to a texture (whereas
     /// [`StagingBelt::write_buffer()`] can only write to other buffers).
     /// All commands involving this slice must be submitted after
     /// [`StagingBelt::finish()`] is called and before [`StagingBelt::recall()`] is called.
@@ -162,7 +219,7 @@ impl StagingBelt {
                     buffer: self.device.create_buffer(&BufferDescriptor {
                         label: Some("(wgpu internal) StagingBelt staging buffer"),
                         size: self.chunk_size.max(size.get()),
-                        usage: BufferUsages::MAP_WRITE | BufferUsages::COPY_SRC,
+                        usage: self.buffer_usages,
                         mapped_at_creation: true,
                     }),
                     offset: 0,
@@ -215,6 +272,39 @@ impl StagingBelt {
         }
     }
 
+    /// Convenience for [`StagingBelt::finish()`] followed by a deferred
+    /// [`StagingBelt::recall()`] that runs automatically when `encoder`'s command
+    /// buffer is submitted.
+    ///
+    /// After calling this method, the staging belt's internal buffers will be
+    /// re-mapped for write once the submission completes, without requiring an
+    /// explicit call to [`StagingBelt::recall()`].
+    ///
+    /// Like [`StagingBelt::recall()`], this method does not block.
+    ///
+    /// # Important
+    ///
+    /// `encoder` must be finished (via [`CommandEncoder::finish()`]) and the
+    /// resulting [`CommandBuffer`] must be submitted to the [`Queue`] **before**
+    /// the next call that needs free staging-belt chunks. If the encoder is
+    /// never submitted, the belt's closed chunks will not be returned and the
+    /// belt will allocate new buffers indefinitely.
+    ///
+    /// [`CommandBuffer`]: crate::CommandBuffer
+    /// [`Queue`]: crate::Queue
+    pub fn finish_and_recall_on_submit(&mut self, encoder: &CommandEncoder) {
+        self.finish();
+        self.receive_chunks();
+
+        for chunk in self.closed_chunks.drain(..) {
+            let sender = self.sender.get_mut().clone();
+            let buffer = chunk.buffer.clone();
+            encoder.map_buffer_on_submit(&buffer, MapMode::Write, .., move |_| {
+                let _ = sender.send(chunk);
+            });
+        }
+    }
+
     /// Move all chunks that the GPU is done with (and are now mapped again)
     /// from `self.receiver` to `self.free_chunks`.
     fn receive_chunks(&mut self) {
@@ -230,6 +320,7 @@ impl fmt::Debug for StagingBelt {
         let Self {
             device,
             chunk_size,
+            buffer_usages,
             active_chunks,
             closed_chunks,
             free_chunks,
@@ -239,6 +330,7 @@ impl fmt::Debug for StagingBelt {
         f.debug_struct("StagingBelt")
             .field("device", device)
             .field("chunk_size", chunk_size)
+            .field("buffer_usages", buffer_usages)
             .field("active_chunks", &active_chunks.len())
             .field("closed_chunks", &closed_chunks.len())
             .field("free_chunks", &free_chunks.len())

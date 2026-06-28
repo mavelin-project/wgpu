@@ -126,8 +126,7 @@ const util = {
   getterOnly(getter) {
     return {
       get: getter,
-      set() {
-      },
+      set() {},
       enumerable: true,
       configurable: true,
     };
@@ -199,6 +198,7 @@ const windowOrWorkerGlobalScope = {
   GPUExternalTexture: util.nonEnumerable(webgpu.GPUExternalTexture),
   GPUSampler: util.nonEnumerable(webgpu.GPUSampler),
   GPUBindGroupLayout: util.nonEnumerable(webgpu.GPUBindGroupLayout),
+  GPUPipelineError: util.nonEnumerable(webgpu.GPUPipelineError),
   GPUPipelineLayout: util.nonEnumerable(webgpu.GPUPipelineLayout),
   GPUBindGroup: util.nonEnumerable(webgpu.GPUBindGroup),
   GPUCompilationInfo: util.nonEnumerable(webgpu.GPUCompilationInfo),
@@ -233,14 +233,31 @@ windowOrWorkerGlobalScope.console.enumerable = false;
 // for the application.
 //
 // Note that catching an error here _does not_ result in a non-zero exit status.
+let enableExternalTexture_ = false;
 const requestDevice = webgpu.GPUAdapter.prototype.requestDevice;
-webgpu.GPUAdapter.prototype.requestDevice = function(desc) {
-    return requestDevice.call(this, desc).then((device) => {
-        device.onuncapturederror = (event) => {
-            core.print("cts_runner caught WebGPU error:" + event.error.message, true);
-        };
-        return device;
-    })
+webgpu.GPUAdapter.prototype.requestDevice = function (desc) {
+  if (enableExternalTexture_) {
+    // Deno doesn't meaningfully support external textures, but we provide
+    // an option to enable it anyways to allow running some CTS tests that
+    // do pass.
+    if (!desc) {
+      desc = { requiredFeatures: ["wgpu-external-texture"] };
+    } else if (!desc.requiredFeatures) {
+      desc.requiredFeatures = ["wgpu-external-texture"];
+    } else {
+      desc.requiredFeatures.push("wgpu-external-texture");
+    }
+  }
+
+  return requestDevice.call(this, desc).then((device) => {
+    device.onuncapturederror = (event) => {
+      core.print(
+        "cts_runner caught WebGPU error: " + event.error.message + "\n",
+        true,
+      );
+    };
+    return device;
+  });
 };
 
 const mainRuntimeGlobalProperties = {
@@ -280,32 +297,33 @@ core.registerErrorBuilder(
   },
 );
 core.registerErrorBuilder(
-    "DOMExceptionAbortError",
-    function DOMExceptionAbortError(msg) {
-      return new domException.DOMException(msg, "AbortError");
-    },
+  "DOMExceptionAbortError",
+  function DOMExceptionAbortError(msg) {
+    return new domException.DOMException(msg, "AbortError");
+  },
 );
 core.registerErrorBuilder(
-    "DOMExceptionInvalidCharacterError",
-    function DOMExceptionInvalidCharacterError(msg) {
-      return new domException.DOMException(msg, "InvalidCharacterError");
-    },
+  "DOMExceptionInvalidCharacterError",
+  function DOMExceptionInvalidCharacterError(msg) {
+    return new domException.DOMException(msg, "InvalidCharacterError");
+  },
 );
 core.registerErrorBuilder(
-    "DOMExceptionDataError",
-    function DOMExceptionDataError(msg) {
-      return new domException.DOMException(msg, "DataError");
-    },
+  "DOMExceptionDataError",
+  function DOMExceptionDataError(msg) {
+    return new domException.DOMException(msg, "DataError");
+  },
 );
 
 let hasBootstrapped = false;
 
-function bootstrapRuntime({ args, cwd }) {
+function bootstrapRuntime({ args, cwd, enableExternalTexture = false }) {
   if (hasBootstrapped) {
     throw new Error("Runtime has already been bootstrapped.");
   }
   performance.setTimeOrigin(DateNow());
   globalThis_ = globalThis;
+  enableExternalTexture_ = enableExternalTexture;
 
   // Remove bootstrapping data from the global scope
   delete globalThis.__bootstrap;

@@ -42,10 +42,10 @@ impl Tlas {
     ///
     /// The returned type depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("AccelerationStructure")]
-    #[doc = crate::hal_type_metal!("AccelerationStructure")]
-    #[doc = crate::hal_type_dx12!("AccelerationStructure")]
-    #[doc = crate::hal_type_gles!("AccelerationStructure")]
+    #[doc = crate::macros::hal_type_vulkan!("AccelerationStructure")]
+    #[doc = crate::macros::hal_type_metal!("AccelerationStructure")]
+    #[doc = crate::macros::hal_type_dx12!("AccelerationStructure")]
+    #[doc = crate::macros::hal_type_gles!("AccelerationStructure")]
     ///
     /// # Deadlocks
     ///
@@ -75,10 +75,16 @@ impl Tlas {
         unsafe { tlas.context.tlas_as_hal::<A>(tlas) }
     }
 
-    #[cfg(custom)]
     /// Returns custom implementation of Tlas (if custom backend and is internally T)
+    #[cfg(custom)]
     pub fn as_custom<T: crate::custom::TlasInterface>(&self) -> Option<&T> {
         self.inner.as_custom()
+    }
+    /// Returns the index of the first instance that has not been modified since the last build.
+    /// Custom backends use this to perform partial TLAS updates.
+    #[cfg(custom)]
+    pub fn lowest_unmodified(&self) -> u32 {
+        self.lowest_unmodified
     }
 
     /// Get a reference to all instances.

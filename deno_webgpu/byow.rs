@@ -6,6 +6,7 @@ use std::ffi::c_void;
   target_os = "linux",
   target_os = "macos",
   target_os = "freebsd",
+  target_os = "netbsd",
   target_os = "openbsd"
 ))]
 use std::ptr::NonNull;
@@ -29,6 +30,7 @@ pub enum ByowError {
     target_os = "windows",
     target_os = "linux",
     target_os = "freebsd",
+    target_os = "netbsd",
     target_os = "openbsd",
   )))]
   #[class(type)]
@@ -56,6 +58,7 @@ pub enum ByowError {
   #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
+    target_os = "netbsd",
     target_os = "openbsd"
   ))]
   #[class(type)]
@@ -65,6 +68,7 @@ pub enum ByowError {
     target_os = "windows",
     target_os = "linux",
     target_os = "freebsd",
+    target_os = "netbsd",
     target_os = "openbsd"
   ))]
   #[class(type)]
@@ -73,6 +77,7 @@ pub enum ByowError {
   #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
+    target_os = "netbsd",
     target_os = "openbsd"
   ))]
   #[class(type)]
@@ -271,7 +276,7 @@ impl<'a> FromV8<'a> for UnsafeWindowSurfaceOptions {
 
 type RawHandles = (
   raw_window_handle::RawWindowHandle,
-  raw_window_handle::RawDisplayHandle,
+  Option<raw_window_handle::RawDisplayHandle>,
 );
 
 #[cfg(target_os = "macos")]
@@ -293,7 +298,7 @@ fn raw_window(
   let display_handle = raw_window_handle::RawDisplayHandle::AppKit(
     raw_window_handle::AppKitDisplayHandle::new(),
   );
-  Ok((win_handle, display_handle))
+  Ok((win_handle, Some(display_handle)))
 }
 
 #[cfg(target_os = "windows")]
@@ -319,10 +324,15 @@ fn raw_window(
 
   let display_handle =
     raw_window_handle::RawDisplayHandle::Windows(WindowsDisplayHandle::new());
-  Ok((win_handle, display_handle))
+  Ok((win_handle, Some(display_handle)))
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+#[cfg(any(
+  target_os = "linux",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
 fn raw_window(
   system: UnsafeWindowSurfaceSystem,
   window: *const c_void,
@@ -356,7 +366,7 @@ fn raw_window(
     return Err(ByowError::InvalidSystem);
   }
 
-  Ok((win_handle, display_handle))
+  Ok((win_handle, Some(display_handle)))
 }
 
 #[cfg(not(any(
@@ -364,6 +374,7 @@ fn raw_window(
   target_os = "windows",
   target_os = "linux",
   target_os = "freebsd",
+  target_os = "netbsd",
   target_os = "openbsd",
 )))]
 fn raw_window(

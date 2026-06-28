@@ -9,39 +9,34 @@ use core::{convert::Infallible, fmt, str};
 
 use crate::{
     api_log,
-    binding_model::BindError,
-    command::pass::flush_bindings_helper,
-    resource::{RawResourceAccess, Trackable},
-};
-use crate::{
-    binding_model::{ImmediateUploadError, LateMinBufferBindingSizeMismatch},
+    binding_model::{BindError, ImmediateUploadError, LateMinBufferBindingSizeMismatch},
     command::{
         bind::{Binder, BinderError},
         compute_command::ArcComputeCommand,
-        end_pipeline_statistics_query,
+        encoder::EncodingState,
         memory_init::{fixup_discarded_surfaces, SurfacesInDiscardState},
-        pass_base, pass_try, validate_and_begin_pipeline_statistics_query, ArcPassTimestampWrites,
-        BasePass, BindGroupStateChange, CommandEncoderError, MapPassErr, PassErrorScope,
-        PassTimestampWrites, QueryUseError, StateChange,
+        pass::{self, flush_bindings_helper},
+        pass_base, pass_try,
+        query::{
+            end_pipeline_statistics_query, record_pass_timestamp_writes,
+            validate_and_begin_pipeline_statistics_query,
+        },
+        ArcCommand, ArcPassTimestampWrites, BasePass, BindGroupStateChange, CommandEncoder,
+        CommandEncoderError, DebugGroupError, EncoderStateError, InnerCommandEncoder, MapPassErr,
+        PassErrorScope, PassStateError, PassTimestampWrites, QueryUseError, StateChange,
+        TimestampWritesError, TransitionResourcesError,
     },
-    device::{DeviceError, MissingDownlevelFlags, MissingFeatures},
+    device::{Device, DeviceError, MissingDownlevelFlags, MissingFeatures},
     global::Global,
     hal_label, id,
     init_tracker::MemoryInitKind,
     pipeline::ComputePipeline,
     resource::{
-        self, Buffer, InvalidResourceError, Labeled, MissingBufferUsageError, ParentDevice,
+        self, Buffer, DestroyedResourceError, InvalidResourceError, Labeled,
+        MissingBufferUsageError, ParentDevice, RawResourceAccess, TextureView, Trackable,
     },
-    track::{ResourceUsageCompatibilityError, Tracker},
+    track::{ResourceUsageCompatibilityError, TextureViewBindGroupState, Tracker},
     Label,
-};
-use crate::{command::InnerCommandEncoder, resource::DestroyedResourceError};
-use crate::{
-    command::{
-        encoder::EncodingState, pass, ArcCommand, CommandEncoder, DebugGroupError,
-        EncoderStateError, PassStateError, TimestampWritesError,
-    },
-    device::Device,
 };
 
 pub type ComputeBasePass = BasePass<ArcComputeCommand, ComputePassError>;
@@ -115,6 +110,7 @@ impl fmt::Debug for ComputePass {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ComputePassDescriptor<'a, PTW = PassTimestampWrites> {
     pub label: Label<'a>,
     /// Defines where and when timestamp values will be written for this pass.
@@ -137,6 +133,10 @@ pub enum DispatchError {
     InvalidGroupSize { current: [u32; 3], limit: u32 },
     #[error(transparent)]
     BindingSizeTooSmall(#[from] LateMinBufferBindingSizeMismatch),
+    #[error("Not all immediate data required by the pipeline has been set via set_immediates (missing byte ranges: {missing})")]
+    MissingImmediateData {
+        missing: naga::valid::ImmediateSlots,
+    },
 }
 
 impl WebGpuError for DispatchError {
@@ -162,10 +162,10 @@ pub enum ComputePassErrorInner {
     DestroyedResource(#[from] DestroyedResourceError),
     #[error("Indirect buffer offset {0:?} is not a multiple of 4")]
     UnalignedIndirectBufferOffset(BufferAddress),
-    #[error("Indirect buffer uses bytes {offset}..{end_offset} which overruns indirect buffer of size {buffer_size}")]
+    #[error("Indirect buffer of {args_size} bytes starting at offset {offset} would overrun buffer of size {buffer_size}")]
     IndirectBufferOverrun {
+        args_size: u64,
         offset: u64,
-        end_offset: u64,
         buffer_size: u64,
     },
     #[error(transparent)]
@@ -178,14 +178,10 @@ pub enum ComputePassErrorInner {
     Bind(#[from] BindError),
     #[error(transparent)]
     ImmediateData(#[from] ImmediateUploadError),
-    #[error("Immediate data offset must be aligned to 4 bytes")]
-    ImmediateOffsetAlignment,
-    #[error("Immediate data size must be aligned to 4 bytes")]
-    ImmediateDataizeAlignment,
-    #[error("Ran out of immediate data space. Don't set 4gb of immediates per ComputePass.")]
-    ImmediateOutOfMemory,
     #[error(transparent)]
     QueryUse(#[from] QueryUseError),
+    #[error(transparent)]
+    TransitionResources(#[from] TransitionResourcesError),
     #[error(transparent)]
     MissingFeatures(#[from] MissingFeatures),
     #[error(transparent)]
@@ -232,33 +228,30 @@ where
 impl WebGpuError for ComputePassError {
     fn webgpu_error_type(&self) -> ErrorType {
         let Self { scope: _, inner } = self;
-        let e: &dyn WebGpuError = match inner {
-            ComputePassErrorInner::Device(e) => e,
-            ComputePassErrorInner::EncoderState(e) => e,
-            ComputePassErrorInner::DebugGroupError(e) => e,
-            ComputePassErrorInner::DestroyedResource(e) => e,
-            ComputePassErrorInner::ResourceUsageCompatibility(e) => e,
-            ComputePassErrorInner::MissingBufferUsage(e) => e,
-            ComputePassErrorInner::Dispatch(e) => e,
-            ComputePassErrorInner::Bind(e) => e,
-            ComputePassErrorInner::ImmediateData(e) => e,
-            ComputePassErrorInner::QueryUse(e) => e,
-            ComputePassErrorInner::MissingFeatures(e) => e,
-            ComputePassErrorInner::MissingDownlevelFlags(e) => e,
-            ComputePassErrorInner::InvalidResource(e) => e,
-            ComputePassErrorInner::TimestampWrites(e) => e,
-            ComputePassErrorInner::InvalidValuesOffset(e) => e,
+        match inner {
+            ComputePassErrorInner::Device(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::EncoderState(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::DebugGroupError(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::DestroyedResource(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::ResourceUsageCompatibility(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::MissingBufferUsage(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::Dispatch(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::Bind(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::ImmediateData(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::QueryUse(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::TransitionResources(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::MissingFeatures(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::MissingDownlevelFlags(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::InvalidResource(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::TimestampWrites(e) => e.webgpu_error_type(),
+            ComputePassErrorInner::InvalidValuesOffset(e) => e.webgpu_error_type(),
 
             ComputePassErrorInner::InvalidParentEncoder
             | ComputePassErrorInner::BindGroupIndexOutOfRange { .. }
             | ComputePassErrorInner::UnalignedIndirectBufferOffset(_)
             | ComputePassErrorInner::IndirectBufferOverrun { .. }
-            | ComputePassErrorInner::ImmediateOffsetAlignment
-            | ComputePassErrorInner::ImmediateDataizeAlignment
-            | ComputePassErrorInner::ImmediateOutOfMemory
-            | ComputePassErrorInner::PassEnded => return ErrorType::Validation,
-        };
-        e.webgpu_error_type()
+            | ComputePassErrorInner::PassEnded => ErrorType::Validation,
+        }
     }
 }
 
@@ -271,6 +264,10 @@ struct State<'scope, 'snatch_guard, 'cmd_enc> {
 
     immediates: Vec<u32>,
 
+    /// A bitmask, tracking which 4-byte slots have been written via `set_immediates`.
+    /// Checked against the pipeline's required slots before each dispatch.
+    immediate_slots_set: naga::valid::ImmediateSlots,
+
     intermediate_trackers: Tracker,
 }
 
@@ -279,6 +276,16 @@ impl<'scope, 'snatch_guard, 'cmd_enc> State<'scope, 'snatch_guard, 'cmd_enc> {
         if let Some(pipeline) = self.pipeline.as_ref() {
             self.pass.binder.check_compatibility(pipeline.as_ref())?;
             self.pass.binder.check_late_buffer_bindings()?;
+            if !self
+                .immediate_slots_set
+                .contains(pipeline.immediate_slots_required)
+            {
+                return Err(DispatchError::MissingImmediateData {
+                    missing: pipeline
+                        .immediate_slots_required
+                        .difference(self.immediate_slots_set),
+                });
+            }
             Ok(())
         } else {
             Err(DispatchError::MissingPipeline(pass::MissingPipeline))
@@ -375,6 +382,70 @@ impl<'scope, 'snatch_guard, 'cmd_enc> State<'scope, 'snatch_guard, 'cmd_enc> {
         );
         Ok(())
     }
+}
+
+/// Compute pass version of [`command::transition_resources`](crate::command::transition_resources).
+/// See also `State::flush_bindings` for details on the implementation.
+fn transition_resources(
+    state: &mut State,
+    buffer_transitions: Vec<wgt::BufferTransition<Arc<Buffer>>>,
+    texture_transitions: Vec<wgt::TextureTransition<Arc<TextureView>>>,
+) -> Result<(), TransitionResourcesError> {
+    let indices = &state.pass.base.device.tracker_indices;
+    state.pass.scope.buffers.set_size(indices.buffers.size());
+    state.pass.scope.textures.set_size(indices.textures.size());
+
+    let mut buffer_ids = Vec::with_capacity(buffer_transitions.len());
+    let mut textures = TextureViewBindGroupState::new();
+
+    // Process buffer transitions
+    for buffer_transition in buffer_transitions {
+        buffer_transition
+            .buffer
+            .same_device(state.pass.base.device)?;
+
+        state
+            .pass
+            .scope
+            .buffers
+            .merge_single(&buffer_transition.buffer, buffer_transition.state)?;
+        buffer_ids.push(buffer_transition.buffer.tracker_index());
+    }
+
+    state
+        .intermediate_trackers
+        .buffers
+        .set_and_remove_from_usage_scope_sparse(&mut state.pass.scope.buffers, buffer_ids);
+
+    // Process texture transitions
+    for texture_transition in texture_transitions {
+        texture_transition
+            .texture
+            .same_device(state.pass.base.device)?;
+
+        unsafe {
+            state.pass.scope.textures.merge_single(
+                &texture_transition.texture.parent,
+                texture_transition.selector,
+                texture_transition.state,
+            )
+        }?;
+
+        textures.insert_single(texture_transition.texture, texture_transition.state);
+    }
+
+    state
+        .intermediate_trackers
+        .textures
+        .set_and_remove_from_usage_scope_sparse(&mut state.pass.scope.textures, &textures);
+
+    // Record any needed barriers based on tracker data
+    CommandEncoder::drain_barriers(
+        state.pass.base.raw_encoder,
+        &mut state.intermediate_trackers,
+        state.pass.base.snatch_guard,
+    );
+    Ok(())
 }
 
 // Running the compute pass.
@@ -555,6 +626,8 @@ pub(super) fn encode_compute_pass(
                 indirect_draw_validation_resources: parent_state.indirect_draw_validation_resources,
                 snatch_guard: parent_state.snatch_guard,
                 debug_scope_depth: &mut debug_scope_depth,
+                query_set_writes: parent_state.query_set_writes,
+                deferred_query_set_resolves: parent_state.deferred_query_set_resolves,
             },
             binder: Binder::new(),
             temp_offsets: Vec::new(),
@@ -567,7 +640,12 @@ pub(super) fn encode_compute_pass(
 
         immediates: Vec::new(),
 
-        intermediate_trackers: Tracker::new(),
+        immediate_slots_set: Default::default(),
+
+        intermediate_trackers: Tracker::new(
+            device.ordered_buffer_usages,
+            device.ordered_texture_usages,
+        ),
     };
 
     let indices = &device.tracker_indices;
@@ -588,6 +666,8 @@ pub(super) fn encode_compute_pass(
         if let Some(tw) = timestamp_writes.take() {
             tw.query_set.same_device(device).map_pass_err(pass_scope)?;
 
+            record_pass_timestamp_writes(&tw, state.pass.base.query_set_writes);
+
             let query_set = state
                 .pass
                 .base
@@ -606,6 +686,9 @@ pub(super) fn encode_compute_pass(
                     .or(tw.end_of_pass_write_index)
                     .map(|i| i..i + 1)
             };
+            let raw_query_set = query_set
+                .try_raw(parent_state.snatch_guard)
+                .map_pass_err(pass_scope)?;
             // Range should always be Some, both values being None should lead to a validation error.
             // But no point in erroring over that nuance here!
             if let Some(range) = range {
@@ -614,12 +697,12 @@ pub(super) fn encode_compute_pass(
                         .pass
                         .base
                         .raw_encoder
-                        .reset_queries(query_set.raw(), range);
+                        .reset_queries(raw_query_set, range);
                 }
             }
 
             Some(hal::PassTimestampWrites {
-                query_set: query_set.raw(),
+                query_set: raw_query_set,
                 beginning_of_pass_write_index: tw.beginning_of_pass_write_index,
                 end_of_pass_write_index: tw.end_of_pass_write_index,
             })
@@ -680,14 +763,17 @@ pub(super) fn encode_compute_pass(
                     },
                 )
                 .map_pass_err(scope)?;
+                state.immediate_slots_set |=
+                    naga::valid::ImmediateSlots::from_range(offset, size_bytes);
             }
-            ArcComputeCommand::Dispatch(groups) => {
+            ArcComputeCommand::DispatchWorkgroups(groups) => {
                 let scope = PassErrorScope::Dispatch { indirect: false };
-                dispatch(&mut state, groups).map_pass_err(scope)?;
+                dispatch_workgroups(&mut state, groups).map_pass_err(scope)?;
             }
-            ArcComputeCommand::DispatchIndirect { buffer, offset } => {
+            ArcComputeCommand::DispatchWorkgroupsIndirect { buffer, offset } => {
                 let scope = PassErrorScope::Dispatch { indirect: true };
-                dispatch_indirect(&mut state, device, buffer, offset).map_pass_err(scope)?;
+                dispatch_workgroups_indirect(&mut state, device, buffer, offset)
+                    .map_pass_err(scope)?;
             }
             ArcComputeCommand::PushDebugGroup { color: _, len } => {
                 pass::push_debug_group(&mut state.pass, &base.string_data, len);
@@ -727,12 +813,26 @@ pub(super) fn encode_compute_pass(
                     query_index,
                     None,
                     &mut state.active_query,
+                    state.pass.base.snatch_guard,
                 )
                 .map_pass_err(scope)?;
             }
             ArcComputeCommand::EndPipelineStatisticsQuery => {
                 let scope = PassErrorScope::EndPipelineStatisticsQuery;
-                end_pipeline_statistics_query(state.pass.base.raw_encoder, &mut state.active_query)
+                end_pipeline_statistics_query(
+                    state.pass.base.raw_encoder,
+                    &mut state.active_query,
+                    state.pass.base.snatch_guard,
+                    state.pass.base.query_set_writes,
+                )
+                .map_pass_err(scope)?;
+            }
+            ArcComputeCommand::TransitionResources {
+                buffer_transitions,
+                texture_transitions,
+            } => {
+                let scope = PassErrorScope::TransitionResources;
+                transition_resources(&mut state, buffer_transitions, texture_transitions)
                     .map_pass_err(scope)?;
             }
         }
@@ -838,7 +938,7 @@ fn set_pipeline(
     )
 }
 
-fn dispatch(state: &mut State, groups: [u32; 3]) -> Result<(), ComputePassErrorInner> {
+fn dispatch_workgroups(state: &mut State, groups: [u32; 3]) -> Result<(), ComputePassErrorInner> {
     api_log!("ComputePass::dispatch {groups:?}");
 
     state.is_ready()?;
@@ -852,10 +952,7 @@ fn dispatch(state: &mut State, groups: [u32; 3]) -> Result<(), ComputePassErrorI
         .limits
         .max_compute_workgroups_per_dimension;
 
-    if groups[0] > groups_size_limit
-        || groups[1] > groups_size_limit
-        || groups[2] > groups_size_limit
-    {
+    if groups.iter().copied().any(|g| g > groups_size_limit) {
         return Err(ComputePassErrorInner::Dispatch(
             DispatchError::InvalidGroupSize {
                 current: groups,
@@ -865,12 +962,12 @@ fn dispatch(state: &mut State, groups: [u32; 3]) -> Result<(), ComputePassErrorI
     }
 
     unsafe {
-        state.pass.base.raw_encoder.dispatch(groups);
+        state.pass.base.raw_encoder.dispatch_workgroups(groups);
     }
     Ok(())
 }
 
-fn dispatch_indirect(
+fn dispatch_workgroups_indirect(
     state: &mut State,
     device: &Arc<Device>,
     buffer: Arc<Buffer>,
@@ -890,15 +987,15 @@ fn dispatch_indirect(
 
     buffer.check_usage(wgt::BufferUsages::INDIRECT)?;
 
-    if offset % 4 != 0 {
+    if !offset.is_multiple_of(4) {
         return Err(ComputePassErrorInner::UnalignedIndirectBufferOffset(offset));
     }
 
-    let end_offset = offset + size_of::<wgt::DispatchIndirectArgs>() as u64;
-    if end_offset > buffer.size {
+    let args_size = size_of::<wgt::DispatchIndirectArgs>() as u64;
+    if buffer.size < args_size || buffer.size - args_size < offset {
         return Err(ComputePassErrorInner::IndirectBufferOverrun {
+            args_size,
             offset,
-            end_offset,
             buffer_size: buffer.size,
         });
     }
@@ -941,7 +1038,7 @@ fn dispatch_indirect(
             state.pass.base.raw_encoder.set_bind_group(
                 params.pipeline_layout,
                 0,
-                Some(params.dst_bind_group),
+                params.dst_bind_group,
                 &[],
             );
         }
@@ -949,14 +1046,12 @@ fn dispatch_indirect(
             state.pass.base.raw_encoder.set_bind_group(
                 params.pipeline_layout,
                 1,
-                Some(
-                    buffer
-                        .indirect_validation_bind_groups
-                        .get(state.pass.base.snatch_guard)
-                        .unwrap()
-                        .dispatch
-                        .as_ref(),
-                ),
+                buffer
+                    .indirect_validation_bind_groups
+                    .get(state.pass.base.snatch_guard)
+                    .unwrap()
+                    .dispatch
+                    .as_ref(),
                 &[params.aligned_offset as u32],
             );
         }
@@ -990,7 +1085,7 @@ fn dispatch_indirect(
         }
 
         unsafe {
-            state.pass.base.raw_encoder.dispatch([1, 1, 1]);
+            state.pass.base.raw_encoder.dispatch_workgroups([1, 1, 1]);
         }
 
         // reset state
@@ -1015,15 +1110,14 @@ fn dispatch_indirect(
                 }
             }
 
-            for (i, e) in state.pass.binder.list_valid() {
-                let group = e.group.as_ref().unwrap();
+            for (i, group, dynamic_offsets) in state.pass.binder.list_valid() {
                 let raw_bg = group.try_raw(state.pass.base.snatch_guard)?;
                 unsafe {
                     state.pass.base.raw_encoder.set_bind_group(
                         pipeline.layout.raw(),
                         i as u32,
-                        Some(raw_bg),
-                        &e.dynamic_offsets,
+                        raw_bg,
+                        dynamic_offsets,
                     );
                 }
             }
@@ -1049,7 +1143,7 @@ fn dispatch_indirect(
                 .pass
                 .base
                 .raw_encoder
-                .dispatch_indirect(params.dst_buffer, 0);
+                .dispatch_workgroups_indirect(params.dst_buffer, 0);
         }
     } else {
         state.flush_bindings(Some(&buffer), true)?;
@@ -1060,7 +1154,7 @@ fn dispatch_indirect(
                 .pass
                 .base
                 .raw_encoder
-                .dispatch_indirect(buf_raw, offset);
+                .dispatch_workgroups_indirect(buf_raw, offset);
         }
     }
 
@@ -1156,29 +1250,18 @@ impl Global {
         let scope = PassErrorScope::SetImmediate;
         let base = pass_base!(pass, scope);
 
-        if offset & (wgt::IMMEDIATE_DATA_ALIGNMENT - 1) != 0 {
-            pass_try!(
-                base,
-                scope,
-                Err(ComputePassErrorInner::ImmediateOffsetAlignment),
-            );
-        }
-
-        if data.len() as u32 & (wgt::IMMEDIATE_DATA_ALIGNMENT - 1) != 0 {
-            pass_try!(
-                base,
-                scope,
-                Err(ComputePassErrorInner::ImmediateDataizeAlignment),
-            )
-        }
-        let value_offset = pass_try!(
+        let size_bytes = pass_try!(
             base,
             scope,
-            base.immediates_data
-                .len()
-                .try_into()
-                .map_err(|_| ComputePassErrorInner::ImmediateOutOfMemory)
+            u32::try_from(data.len()).map_err(|_| ImmediateUploadError::ImmediateOutOfMemory)
         );
+        pass_try!(
+            base,
+            scope,
+            pass::validate_immediates_alignment(offset, size_bytes)
+        );
+
+        let values_offset = base.immediates_data.len().try_into().unwrap();
 
         base.immediates_data.extend(
             data.chunks_exact(wgt::IMMEDIATE_DATA_ALIGNMENT as usize)
@@ -1188,7 +1271,7 @@ impl Global {
         base.commands.push(ArcComputeCommand::SetImmediate {
             offset,
             size_bytes: data.len() as u32,
-            values_offset: value_offset,
+            values_offset,
         });
 
         Ok(())
@@ -1205,7 +1288,9 @@ impl Global {
 
         pass_base!(pass, scope)
             .commands
-            .push(ArcComputeCommand::Dispatch([groups_x, groups_y, groups_z]));
+            .push(ArcComputeCommand::DispatchWorkgroups([
+                groups_x, groups_y, groups_z,
+            ]));
 
         Ok(())
     }
@@ -1223,7 +1308,7 @@ impl Global {
         let buffer = pass_try!(base, scope, hub.buffers.get(buffer_id).get());
 
         base.commands
-            .push(ArcComputeCommand::DispatchIndirect { buffer, offset });
+            .push(ArcComputeCommand::DispatchWorkgroupsIndirect { buffer, offset });
 
         Ok(())
     }
@@ -1325,6 +1410,51 @@ impl Global {
         pass_base!(pass, PassErrorScope::EndPipelineStatisticsQuery)
             .commands
             .push(ArcComputeCommand::EndPipelineStatisticsQuery);
+
+        Ok(())
+    }
+
+    pub fn compute_pass_transition_resources(
+        &self,
+        pass: &mut ComputePass,
+        buffer_transitions: impl Iterator<Item = wgt::BufferTransition<id::BufferId>>,
+        texture_transitions: impl Iterator<Item = wgt::TextureTransition<id::TextureViewId>>,
+    ) -> Result<(), PassStateError> {
+        let scope = PassErrorScope::TransitionResources;
+        let base = pass_base!(pass, scope);
+
+        let hub = &self.hub;
+        let buffer_transitions = pass_try!(
+            base,
+            scope,
+            buffer_transitions
+                .map(|buffer_transition| -> Result<_, InvalidResourceError> {
+                    Ok(wgt::BufferTransition {
+                        buffer: hub.buffers.get(buffer_transition.buffer).get()?,
+                        state: buffer_transition.state,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        );
+
+        let texture_transitions = pass_try!(
+            base,
+            scope,
+            texture_transitions
+                .map(|texture_transition| -> Result<_, InvalidResourceError> {
+                    Ok(wgt::TextureTransition {
+                        texture: hub.texture_views.get(texture_transition.texture).get()?,
+                        selector: texture_transition.selector,
+                        state: texture_transition.state,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        );
+
+        base.commands.push(ArcComputeCommand::TransitionResources {
+            buffer_transitions,
+            texture_transitions,
+        });
 
         Ok(())
     }

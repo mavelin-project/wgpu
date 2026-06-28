@@ -3,6 +3,7 @@ use wgpu_test::{gpu_test, GpuTestConfiguration, TestParameters, TestingContext};
 
 pub fn all_tests(vec: &mut Vec<wgpu_test::GpuTestInitializer>) {
     vec.push(BARYCENTRIC);
+    vec.push(BARYCENTRIC_NO_PERSPECTIVE);
 }
 
 //
@@ -36,9 +37,18 @@ static BARYCENTRIC: GpuTestConfiguration = GpuTestConfiguration::new()
             .test_features_limits()
             .features(wgpu::Features::SHADER_BARYCENTRICS),
     )
-    .run_async(barycentric);
+    .run_async(|ctx| barycentric(ctx, false));
 
-async fn barycentric(ctx: TestingContext) {
+#[gpu_test]
+static BARYCENTRIC_NO_PERSPECTIVE: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(
+        TestParameters::default()
+            .test_features_limits()
+            .features(wgpu::Features::SHADER_BARYCENTRICS),
+    )
+    .run_async(|ctx| barycentric(ctx, true));
+
+async fn barycentric(ctx: TestingContext, no_perspective: bool) {
     let shader = ctx
         .device
         .create_shader_module(wgpu::include_wgsl!("barycentric.wgsl"));
@@ -72,7 +82,7 @@ async fn barycentric(ctx: TestingContext) {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 8,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[wgpu::VertexAttribute {
@@ -80,14 +90,18 @@ async fn barycentric(ctx: TestingContext) {
                         offset: 0,
                         shader_location: 0,
                     }],
-                }],
+                })],
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: if no_perspective {
+                    Some("fs_main_no_perspective")
+                } else {
+                    Some("fs_main")
+                },
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm,

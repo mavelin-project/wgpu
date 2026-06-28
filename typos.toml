@@ -17,11 +17,18 @@ extend-exclude = [
 
 [default.extend-words]
 # Things that aren't typos
+consts = "consts"
 lod = "lod"
 metalness = "metalness"
 
 # A DXC command line argument
 Fo = "Fo"
+
+# Abbreviation of Structured Exception Handling
+SEH = "SEH"
+
+# Content Light Level (HDR mastering metadata, e.g. MaxCLL)
+CLL = "CLL"
 
 # Usernames
 Healthire = "Healthire"

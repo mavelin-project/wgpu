@@ -1,92 +1,14 @@
-// Same as in mesh shader tests
-fn compile_wgsl(device: &wgpu::Device) -> wgpu::ShaderModule {
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-    })
-}
-fn compile_hlsl(device: &wgpu::Device, entry: &str, stage_str: &str) -> wgpu::ShaderModule {
-    let out_path = format!(
-        "{}/src/mesh_shader/shader.{stage_str}.cso",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let cmd = std::process::Command::new("dxc")
-        .args([
-            "-T",
-            &format!("{stage_str}_6_5"),
-            "-E",
-            entry,
-            &format!("{}/src/mesh_shader/shader.hlsl", env!("CARGO_MANIFEST_DIR")),
-            "-Fo",
-            &out_path,
-        ])
-        .output()
-        .unwrap();
-    if !cmd.status.success() {
-        panic!("DXC failed:\n{}", String::from_utf8(cmd.stderr).unwrap());
-    }
-    let file = std::fs::read(&out_path).unwrap();
-    std::fs::remove_file(out_path).unwrap();
-    unsafe {
-        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
-            entry_point: entry.to_owned(),
-            label: None,
-            num_workgroups: (1, 1, 1),
-            dxil: Some(std::borrow::Cow::Owned(file)),
-            ..Default::default()
-        })
-    }
-}
-
-fn compile_msl(device: &wgpu::Device, entry: &str) -> wgpu::ShaderModule {
-    unsafe {
-        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
-            entry_point: entry.to_owned(),
-            label: None,
-            msl: Some(std::borrow::Cow::Borrowed(include_str!("shader.metal"))),
-            num_workgroups: (1, 1, 1),
-            ..Default::default()
-        })
-    }
-}
-
 pub struct Example {
     pipeline: wgpu::RenderPipeline,
 }
 impl crate::framework::Example for Example {
     fn init(
         config: &wgpu::SurfaceConfiguration,
-        adapter: &wgpu::Adapter,
+        _adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
     ) -> Self {
-        let (ts, ms, fs, ts_name, ms_name, fs_name) = match adapter.get_info().backend {
-            wgpu::Backend::Vulkan => (
-                compile_wgsl(device),
-                compile_wgsl(device),
-                compile_wgsl(device),
-                "ts_main",
-                "ms_main",
-                "fs_main",
-            ),
-            wgpu::Backend::Dx12 => (
-                compile_hlsl(device, "Task", "as"),
-                compile_hlsl(device, "Mesh", "ms"),
-                compile_hlsl(device, "Frag", "ps"),
-                "main",
-                "main",
-                "main",
-            ),
-            wgpu::Backend::Metal => (
-                compile_msl(device, "taskShader"),
-                compile_msl(device, "meshShader"),
-                compile_msl(device, "fragShader"),
-                "main",
-                "main",
-                "main",
-            ),
-            _ => panic!("Example can currently only run on vulkan, dx12 or metal"),
-        };
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
@@ -96,18 +18,18 @@ impl crate::framework::Example for Example {
             label: None,
             layout: Some(&pipeline_layout),
             task: Some(wgpu::TaskState {
-                module: &ts,
-                entry_point: Some(ts_name),
+                module: &shader,
+                entry_point: Some("ts_main"),
                 compilation_options: Default::default(),
             }),
             mesh: wgpu::MeshState {
-                module: &ms,
-                entry_point: Some(ms_name),
+                module: &shader,
+                entry_point: Some("ms_main"),
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &fs,
-                entry_point: Some(fs_name),
+                module: &shader,
+                entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(config.view_formats[0].into())],
             }),
@@ -159,7 +81,7 @@ impl crate::framework::Example for Example {
         Default::default()
     }
     fn required_features() -> wgpu::Features {
-        wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::EXPERIMENTAL_PASSTHROUGH_SHADERS
+        wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS
     }
     fn required_limits() -> wgpu::Limits {
         wgpu::Limits::defaults().using_recommended_minimum_mesh_shader_values()
@@ -190,10 +112,7 @@ pub static TEST: crate::framework::ExampleTestParams = crate::framework::Example
     height: 768,
     optional_features: wgpu::Features::default(),
     base_test_parameters: wgpu_test::TestParameters::default()
-        .features(
-            wgpu::Features::EXPERIMENTAL_MESH_SHADER
-                | wgpu::Features::EXPERIMENTAL_PASSTHROUGH_SHADERS,
-        )
+        .features(wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS)
         .instance_flags(wgpu::InstanceFlags::advanced_debugging())
         .limits(wgpu::Limits::defaults().using_recommended_minimum_mesh_shader_values())
         .skip(wgpu_test::FailureCase {

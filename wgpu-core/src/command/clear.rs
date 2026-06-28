@@ -1,4 +1,4 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::ops::Range;
 
 use crate::{
@@ -11,8 +11,9 @@ use crate::{
     id::{BufferId, CommandEncoderId, TextureId},
     init_tracker::{MemoryInitKind, TextureInitRange},
     resource::{
-        Buffer, DestroyedResourceError, InvalidResourceError, Labeled, MissingBufferUsageError,
-        ParentDevice, RawResourceAccess, ResourceErrorIdent, Texture, TextureClearMode,
+        Buffer, DestroyedResourceError, InvalidOrDestroyedResourceError, InvalidResourceError,
+        Labeled, MissingBufferUsageError, ParentDevice, RawResourceAccess, ResourceErrorIdent,
+        Texture, TextureClearMode,
     },
     snatch::SnatchGuard,
     track::TextureTrackerSetSingle,
@@ -79,15 +80,24 @@ whereas subesource range specified start {subresource_base_array_layer} and coun
     InvalidResource(#[from] InvalidResourceError),
 }
 
+impl From<InvalidOrDestroyedResourceError> for ClearError {
+    fn from(value: InvalidOrDestroyedResourceError) -> Self {
+        match value {
+            InvalidOrDestroyedResourceError::InvalidResource(e) => Self::InvalidResource(e),
+            InvalidOrDestroyedResourceError::DestroyedResource(e) => Self::DestroyedResource(e),
+        }
+    }
+}
+
 impl WebGpuError for ClearError {
     fn webgpu_error_type(&self) -> ErrorType {
-        let e: &dyn WebGpuError = match self {
-            Self::DestroyedResource(e) => e,
-            Self::MissingFeatures(e) => e,
-            Self::MissingBufferUsage(e) => e,
-            Self::Device(e) => e,
-            Self::EncoderState(e) => e,
-            Self::InvalidResource(e) => e,
+        match self {
+            Self::DestroyedResource(e) => e.webgpu_error_type(),
+            Self::MissingFeatures(e) => e.webgpu_error_type(),
+            Self::MissingBufferUsage(e) => e.webgpu_error_type(),
+            Self::Device(e) => e.webgpu_error_type(),
+            Self::EncoderState(e) => e.webgpu_error_type(),
+            Self::InvalidResource(e) => e.webgpu_error_type(),
             Self::NoValidTextureClearMode(..)
             | Self::UnalignedFillSize(..)
             | Self::UnalignedBufferOffset(..)
@@ -95,9 +105,8 @@ impl WebGpuError for ClearError {
             | Self::BufferOverrun { .. }
             | Self::MissingTextureAspect { .. }
             | Self::InvalidTextureLevelRange { .. }
-            | Self::InvalidTextureLayerRange { .. } => return ErrorType::Validation,
-        };
-        e.webgpu_error_type()
+            | Self::InvalidTextureLayerRange { .. } => ErrorType::Validation,
+        }
     }
 }
 
@@ -138,11 +147,14 @@ impl Global {
         let hub = &self.hub;
 
         let cmd_enc = hub.command_encoders.get(command_encoder_id);
+
         let mut cmd_buf_data = cmd_enc.data.lock();
 
         cmd_buf_data.push_with(|| -> Result<_, ClearError> {
+            let texture = self.resolve_texture_id(dst);
+            texture.check_valid(&cmd_enc.device.snatchable_lock.read())?;
             Ok(ArcCommand::ClearTexture {
-                dst: self.resolve_texture_id(dst)?,
+                dst: texture,
                 subresource_range: *subresource_range,
             })
         })
@@ -166,12 +178,12 @@ pub(super) fn clear_buffer(
     dst_buffer.check_usage(BufferUsages::COPY_DST)?;
 
     // Check if offset & size are valid.
-    if offset % wgt::COPY_BUFFER_ALIGNMENT != 0 {
+    if !offset.is_multiple_of(wgt::COPY_BUFFER_ALIGNMENT) {
         return Err(ClearError::UnalignedBufferOffset(offset));
     }
 
     let size = size.unwrap_or(dst_buffer.size.saturating_sub(offset));
-    if size % wgt::COPY_BUFFER_ALIGNMENT != 0 {
+    if !size.is_multiple_of(wgt::COPY_BUFFER_ALIGNMENT) {
         return Err(ClearError::UnalignedFillSize(size));
     }
     let end_offset =
@@ -298,7 +310,7 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
     snatch_guard: &SnatchGuard<'_>,
     instance_flags: wgt::InstanceFlags,
 ) -> Result<(), ClearError> {
-    let dst_raw = dst_texture.try_raw(snatch_guard)?;
+    let dst_raw = dst_texture.try_inner(snatch_guard)?.raw();
 
     // Issue the right barrier.
     let clear_usage = match *dst_texture.clear_mode.read() {
@@ -371,7 +383,7 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
 }
 
 fn clear_texture_via_buffer_copies(
-    texture_desc: &wgt::TextureDescriptor<(), Vec<wgt::TextureFormat>>,
+    texture_desc: &wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
     alignments: &hal::Alignments,
     zero_buffer: &dyn hal::DynBuffer, // Buffer of size device::ZERO_BUFFER_SIZE
     range: TextureInitRange,

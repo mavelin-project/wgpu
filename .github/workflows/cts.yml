@@ -14,10 +14,12 @@ on:
   merge_group:
 
 env:
+  REPO_MSRV: "1.93"
   CARGO_INCREMENTAL: false
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  MSRV: "1.92"
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
 
 # Every time a PR is pushed to, cancel any previous jobs. This
 # makes us behave nicer to github and get faster turnaround times
@@ -50,21 +52,32 @@ jobs:
             os: windows-2022
             target: x86_64-pc-windows-msvc
             backend: dx12
+            shell: bash
 
           # Mac
+          # Need to use `zsh` for `source <(cmd)` because it doesn't work in
+          # ancient MacOS bash. `zsh` is a non-standard shell in GitHub
+          # actions, so must be specified as a command string.
           - platform: Mac aarch64
             os: macos-14
             target: x86_64-apple-darwin
             backend: metal
+            shell: zsh {0}
 
           # Linux
           - platform: Linux x86_64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             backend: vulkan
+            shell: bash
 
     name: ${{ matrix.suite }} ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        # Substitution of ${{ matrix.shell }} appears not to work in per-step configuration
+        shell: ${{ matrix.shell }}
 
     steps:
       - name: checkout repo
@@ -72,8 +85,8 @@ jobs:
 
       - name: Install Repo MSRV toolchain
         run: |
-          rustup toolchain install ${{ env.MSRV }} --no-self-update --profile=minimal --target ${{ matrix.target }} --component llvm-tools
-          rustup override set ${{ env.MSRV }}
+          rustup toolchain install ${{ env.REPO_MSRV }} --no-self-update --profile=minimal --target ${{ matrix.target }} --component llvm-tools
+          rustup override set ${{ env.REPO_MSRV }}
           cargo -V
 
       - name: Install `cargo-llvm-cov`
@@ -85,8 +98,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           # The version number can be incremented for cache busting.
-          prefix-key: v2-rust-${{ hashFiles('cts_runner/revision.txt') }}
+          prefix-key: v3-rust-${{ hashFiles('cts_runner/revision.txt') }}
+          env-vars: ImageVersion
           cache-directories: cts
+          # Save the cache from the `other` job because it also runs the cts_runner
+          # integration tests.
+          save-if: ${{ github.ref == 'refs/heads/trunk' && matrix.suite == 'other' }}
 
       # We enable line numbers for panics, but that's it
       - name: disable debug
@@ -98,27 +115,49 @@ jobs:
           debug = "line-tables-only"
           EOF
 
+      # Unlike regular `llvm-cov run`, which builds artifacts in `target/llvm-cov-target`,
+      # `llvm-cov show-env` uses the regular target directory for artifacts. Because of this,
+      # this job configures the `install-mesa` and `install-warp` actions with the regular
+      # target directory, not the `llvm-cov-target` directory.
+      #
+      # The `GITHUB_ENV` file is not subject to shell expansion, so we need to un-escape the
+      # `llvm-cov show-env` output.
+      - name: Set llvm-cov environment
+        shell: bash
+        run: |
+          cargo llvm-cov --no-cfg-coverage show-env | while read -r assignment; do
+            key="${assignment%%=*}"
+            eval "$assignment"
+            echo "$key=${!key}" >> "$GITHUB_ENV"
+          done
+
       - name: (Windows) Install DXC
         if: matrix.os == 'windows-2022'
         uses: ./.github/actions/install-dxc
 
+      # Note: `target-dir` is intentionally different from other jobs.
+      # See note above about `llvm-cov show-env`.
       - name: (Windows) Install WARP
         if: matrix.os == 'windows-2022'
         uses: ./.github/actions/install-warp
         with:
-          target-dir: "target/llvm-cov-target/debug"
+          target-dir: "target/debug"
 
       - name: (Linux) Install Mesa
         if: matrix.os == 'ubuntu-24.04'
         uses: ./.github/actions/install-mesa
+        with:
+          target-dir: "target/debug"
 
-      # Mixing --llvm-cov with deno (rusty_v8) has linking problems.
-      # Explicitly set the backend to avoid EGL messages in output,
-      # because these tests check stdout.
+      # Some of these tests check stdout, so we explicitly set the backend
+      # to avoid getting EGL messages in the output.
       - name: Test cts_runner
         if: matrix.suite == 'other'
         shell: bash
-        run: DENO_WEBGPU_BACKEND=${{ matrix.backend }} cargo --locked test -p cts_runner
+        run: |
+          export LLVM_PROFILE_FILE=${{ github.workspace }}/target/wgpu-%p-%m.profraw
+          export DENO_WEBGPU_BACKEND=${{ matrix.backend }}
+          cargo --locked test -p cts_runner
 
       - name: Run CTS
         shell: bash
@@ -126,7 +165,6 @@ jobs:
 
       - name: Generate coverage report
         id: coverage
-        shell: bash
         continue-on-error: true
         run: |
           set -e
@@ -134,7 +172,7 @@ jobs:
           cargo --locked llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage report to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         if: steps.coverage.outcome == 'success'
         with:
           files: lcov.info

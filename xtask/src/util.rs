@@ -2,6 +2,7 @@ use std::{ffi::OsString, io, process::Command};
 
 use anyhow::Context;
 use pico_args::Arguments;
+use serde_json::{json, Value};
 use xshell::Shell;
 
 pub(crate) struct Program {
@@ -110,6 +111,11 @@ fn parse_git_version_output(output: &str) -> anyhow::Result<GitVersion> {
         .split_once(".windows")
         .map_or(raw_version, |(before, _after)| before);
 
+    let raw_version = raw_version
+        .split_once("(Apple")
+        .map_or(raw_version, |(before, _after)| before)
+        .trim();
+
     let parsed = GitVersion::try_from(
         raw_version
             .splitn(3, '.')
@@ -128,6 +134,21 @@ fn parse_git_version_output(output: &str) -> anyhow::Result<GitVersion> {
     Ok(parsed)
 }
 
+pub(crate) fn parse_binary_from_cargo_json(jsonl: &str) -> Option<String> {
+    jsonl
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|json| {
+            json.get("reason") == Some(&json!("compiler-artifact"))
+                && json.get("target").and_then(|obj| obj.get("kind")) == Some(&json!(["bin"]))
+        })
+        .find_map(|json| {
+            json.get("executable")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
 #[test]
 fn test_git_version_parsing() {
     macro_rules! test_ok {
@@ -139,6 +160,7 @@ fn test_git_version_parsing() {
     test_ok!("git version 0.255.0", [0, 255, 0]);
     test_ok!("git version 4.5.6", [4, 5, 6]);
     test_ok!("git version 2.3.0.windows.1", [2, 3, 0]);
+    test_ok!("git version 2.50.1 (Apple Git-155)", [2, 50, 1]);
 
     macro_rules! test_err {
         ($input:expr, $msg:expr) => {

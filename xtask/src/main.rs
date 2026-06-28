@@ -8,6 +8,7 @@ use pico_args::Arguments;
 
 mod changelog;
 mod cts;
+mod install_agility_sdk;
 mod install_warp;
 mod miri;
 mod run_wasm;
@@ -22,14 +23,29 @@ Commands:
   cts [<options>] [<test selector...> | -f <test list file...> | -- <args...>]
     Check out, build, and run CTS tests
 
-    --skip-checkout         Don't check out the pinned CTS version, use whatever
-                            is already checked out.
-    --release               Build and run in release mode
-    --llvm-cov              Run with LLVM code coverage
-    --backend <backend>     Specify the backend (metal, dx12, or vulkan). Used
-                            to evaluate `fails-if` conditions in the test list.
-    --filter <regex>        Filter tests by selector using a regex pattern.
-                            Applied after all tests are collected.
+    If no command-line arguments are specified, runs as if `cts
+    -f cts_runner/test.lst --print-output-when=test-fails` were
+    specified.
+
+    --skip-checkout             Don't check out the pinned CTS version, use whatever
+                                is already checked out.
+    --release                   Build and run in release mode
+    --llvm-cov                  Run with LLVM code coverage
+    --backend <backend>         Specify the backend (metal, dx12, or vulkan). Used
+                                to evaluate `fails-if` conditions in the test list.
+    --filter <regex>            Filter tests by selector using a regex pattern.
+                                Prefix with '!' to invert (exclude matching tests).
+                                Applied after all tests are collected.
+    --print-output-when         One of `test-fails` or `always`. When no `test
+                                selector`, `test list file`, or `args` are
+                                specified, this defaults to `test-fails`. Otherwise,
+                                this defaults to `always`.
+    --enable-external-texture   Enable the external-texture feature. By default it is
+                                enabled if `--backend` specifies Metal or DX12,
+                                otherwise disabled. External textures do not really
+                                work in Deno, but some CTS tests for shaders and
+                                pipeline layouts are able to pass.
+    --disable-external-texture  Disable the external-texture feature.
 
   run-wasm
     Build and run web examples
@@ -40,9 +56,10 @@ Commands:
   test
     Run tests
 
-    --llvm-cov  Run tests with LLVM code coverage using the llvm-cov tool
-    --list      List all of the tests and their executables without running them
-    --retries   Number of times to retry failing tests
+    --llvm-cov                    Run tests with LLVM code coverage using the llvm-cov tool
+    --list                        List all of the tests and their executables without running them
+    --retries                     Number of times to retry failing tests
+    --no-require-agility-sdk      Don't fail if the D3D12 Agility SDK cannot be loaded (fall back to system runtime)
 
     All extra arguments will be forwarded to cargo-nextest (NOT wgpu-info)
 
@@ -79,8 +96,14 @@ Commands:
 
     --target-dir <dir>    The target directory to install WARP into.
     --profile <profile>   The cargo profile to install WARP for (default: debug)
-    
+
     Note: Cannot specify both --target-dir and --profile
+
+  install-agility-sdk
+    Download and install the D3D12 Agility SDK for testing with a specific D3D12 runtime version.
+
+    Prints the required environment variables (WGPU_DX12_AGILITY_SDK_PATH and
+    WGPU_DX12_AGILITY_SDK_VERSION) to stdout after installation.
 
 Options:
   -h, --help  Print help
@@ -130,6 +153,7 @@ fn main() -> anyhow::Result<ExitCode> {
         Some("miri") => miri::run_miri(shell, args)?,
         Some("test") => test::run_tests(shell, args, passthrough_args)?,
         Some("vendor-web-sys") => vendor_web_sys::run_vendor_web_sys(shell, args)?,
+        Some("install-agility-sdk") => install_agility_sdk::run_install_agility_sdk(shell, args)?,
         Some("install-warp") => install_warp::run_install_warp(shell, args)?,
         Some(subcommand) => {
             bad_arguments!("Unknown subcommand: {}", subcommand)

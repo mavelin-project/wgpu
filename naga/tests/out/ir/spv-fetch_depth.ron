@@ -159,6 +159,7 @@
             )),
             ty: 4,
             init: None,
+            memory_decorations: (""),
         ),
         (
             name: None,
@@ -171,6 +172,7 @@
             )),
             ty: 7,
             init: None,
+            memory_decorations: (""),
         ),
         (
             name: None,
@@ -181,6 +183,7 @@
             )),
             ty: 10,
             init: None,
+            memory_decorations: (""),
         ),
     ],
     global_expressions: [
@@ -268,6 +271,7 @@
             ),
             mesh_info: None,
             task_payload: None,
+            incoming_ray_payload: None,
         ),
     ],
     diagnostic_filters: [],

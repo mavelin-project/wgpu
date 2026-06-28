@@ -108,10 +108,10 @@ impl Adapter {
     ///
     /// The returned type depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Adapter")]
-    #[doc = crate::hal_type_metal!("Adapter")]
-    #[doc = crate::hal_type_dx12!("Adapter")]
-    #[doc = crate::hal_type_gles!("Adapter")]
+    #[doc = crate::macros::hal_type_vulkan!("Adapter")]
+    #[doc = crate::macros::hal_type_metal!("Adapter")]
+    #[doc = crate::macros::hal_type_dx12!("Adapter")]
+    #[doc = crate::macros::hal_type_gles!("Adapter")]
     ///
     /// # Errors
     ///
@@ -216,7 +216,6 @@ impl Adapter {
     /// Returns an empty vector if cooperative matrices are not supported.
     ///
     /// Requires [`Features::EXPERIMENTAL_COOPERATIVE_MATRIX`] to be meaningful.
-    #[cfg(wgpu_core)]
     pub fn cooperative_matrix_properties(&self) -> Vec<CooperativeMatrixProperties> {
         self.inner.cooperative_matrix_properties()
     }

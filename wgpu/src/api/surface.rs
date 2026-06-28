@@ -58,6 +58,11 @@ impl Surface<'_> {
 
     /// Return a default `SurfaceConfiguration` from width and height to use for the [`Surface`] with this adapter.
     ///
+    /// The returned configuration requests the surface's preferred format and
+    /// [`SurfaceColorSpace::Auto`], reproducing wgpu's historical SDR / standard
+    /// behavior. Set the `color_space` field to opt into wide-gamut or HDR
+    /// output; see [`SurfaceColorSpace`] for what each color space means.
+    ///
     /// Returns None if the surface isn't supported by this adapter
     pub fn get_default_config(
         &self,
@@ -69,6 +74,7 @@ impl Surface<'_> {
         Some(SurfaceConfiguration {
             usage: wgt::TextureUsages::RENDER_ATTACHMENT,
             format: *caps.formats.first()?,
+            color_space: wgt::SurfaceColorSpace::Auto,
             width,
             height,
             desired_maximum_frame_latency: 2,
@@ -89,8 +95,10 @@ impl Surface<'_> {
     ///
     /// # Panics
     ///
-    /// - A old [`SurfaceTexture`] is still alive referencing an old surface.
+    /// - An old [`SurfaceTexture`] is still alive referencing an old surface.
     /// - Texture format requested is unsupported on the surface.
+    /// - The requested color space is unsupported for the requested format
+    ///   (see [`SurfaceCapabilities::format_capabilities`]).
     /// - `config.width` or `config.height` is zero.
     pub fn configure(&self, device: &Device, config: &SurfaceConfiguration) {
         self.inner.configure(&device.inner, config);
@@ -102,28 +110,36 @@ impl Surface<'_> {
     /// Returns the current configuration of [`Surface`], if configured.
     ///
     /// This is similar to [WebGPU `GPUcCanvasContext::getConfiguration`](https://gpuweb.github.io/gpuweb/#dom-gpucanvascontext-getconfiguration).
+    ///
+    /// Note that this returns the configuration as passed to
+    /// [`Surface::configure`]: automatic values such as
+    /// [`SurfaceColorSpace::Auto`] are returned as-is, not as the concrete
+    /// values they resolved to.
     pub fn get_configuration(&self) -> Option<SurfaceConfiguration> {
         self.config.lock().clone()
     }
 
-    /// Returns the next texture to be presented by the swapchain for drawing.
+    /// Returns the next texture to be presented by the surface for drawing.
     ///
-    /// In order to present the [`SurfaceTexture`] returned by this method,
-    /// first a [`Queue::submit`] needs to be done with some work rendering to this texture.
-    /// Then [`SurfaceTexture::present`] needs to be called.
+    /// After rendering to the returned [`SurfaceTexture`], submit work via [`Queue::submit`]
+    /// and then call [`Queue::present`] to display it.
     ///
-    /// If a SurfaceTexture referencing this surface is alive when the swapchain is recreated,
-    /// recreating the swapchain will panic.
-    pub fn get_current_texture(&self) -> Result<SurfaceTexture, SurfaceError> {
+    /// If a [`SurfaceTexture`] referencing this surface is alive when [`Surface::configure()`]
+    /// is called, the configure call will panic.
+    ///
+    /// See the documentation of [`CurrentSurfaceTexture`] for how each possible result
+    /// should be handled.
+    pub fn get_current_texture(&self) -> CurrentSurfaceTexture {
         let (texture, status, detail) = self.inner.get_current_texture();
 
         let suboptimal = match status {
             SurfaceStatus::Good => false,
             SurfaceStatus::Suboptimal => true,
-            SurfaceStatus::Timeout => return Err(SurfaceError::Timeout),
-            SurfaceStatus::Outdated => return Err(SurfaceError::Outdated),
-            SurfaceStatus::Lost => return Err(SurfaceError::Lost),
-            SurfaceStatus::Unknown => return Err(SurfaceError::Other),
+            SurfaceStatus::Timeout => return CurrentSurfaceTexture::Timeout,
+            SurfaceStatus::Occluded => return CurrentSurfaceTexture::Occluded,
+            SurfaceStatus::Outdated => return CurrentSurfaceTexture::Outdated,
+            SurfaceStatus::Lost => return CurrentSurfaceTexture::Lost,
+            SurfaceStatus::Validation => return CurrentSurfaceTexture::Validation,
         };
 
         let guard = self.config.lock();
@@ -146,17 +162,24 @@ impl Surface<'_> {
             view_formats: &[],
         };
 
-        texture
-            .map(|texture| SurfaceTexture {
-                texture: Texture {
-                    inner: texture,
-                    descriptor,
-                },
-                suboptimal,
-                presented: false,
-                detail,
-            })
-            .ok_or(SurfaceError::Lost)
+        match texture {
+            Some(texture) => {
+                let surface_texture = SurfaceTexture {
+                    texture: Texture {
+                        inner: texture,
+                        descriptor,
+                    },
+                    presented: false,
+                    detail,
+                };
+                if suboptimal {
+                    CurrentSurfaceTexture::Suboptimal(surface_texture)
+                } else {
+                    CurrentSurfaceTexture::Success(surface_texture)
+                }
+            }
+            None => CurrentSurfaceTexture::Lost,
+        }
     }
 
     /// Get the [`wgpu_hal`] surface from this `Surface`.
@@ -171,10 +194,10 @@ impl Surface<'_> {
     ///
     /// The returned type depends on the backend:
     ///
-    #[doc = crate::hal_type_vulkan!("Surface")]
-    #[doc = crate::hal_type_metal!("Surface")]
-    #[doc = crate::hal_type_dx12!("Surface")]
-    #[doc = crate::hal_type_gles!("Surface")]
+    #[doc = crate::macros::hal_type_vulkan!("Surface")]
+    #[doc = crate::macros::hal_type_metal!("Surface")]
+    #[doc = crate::macros::hal_type_dx12!("Surface")]
+    #[doc = crate::macros::hal_type_gles!("Surface")]
     ///
     /// # Errors
     ///
@@ -230,10 +253,15 @@ static_assertions::assert_impl_all!(Surface<'_>: Send, Sync);
 
 crate::cmp::impl_eq_ord_hash_proxy!(Surface<'_> => .inner);
 
-/// Super trait for window handles as used in [`SurfaceTarget`].
-pub trait WindowHandle: HasWindowHandle + HasDisplayHandle + WasmNotSendSync {}
+/// [`Send`]/[`Sync`] blanket trait for [`HasWindowHandle`] used in [`SurfaceTarget`].
+pub trait WindowHandle: HasWindowHandle + WasmNotSendSync {}
 
-impl<T> WindowHandle for T where T: HasWindowHandle + HasDisplayHandle + WasmNotSendSync {}
+impl<T: HasWindowHandle + WasmNotSendSync> WindowHandle for T {}
+
+/// Super trait for a pair of display and window handles as used in [`SurfaceTarget`].
+pub trait DisplayAndWindowHandle: WindowHandle + HasDisplayHandle {}
+
+impl<T> DisplayAndWindowHandle for T where T: WindowHandle + HasDisplayHandle {}
 
 /// The window/canvas/surface/swap-chain/etc. a surface is attached to, for use with safe surface creation.
 ///
@@ -244,7 +272,7 @@ impl<T> WindowHandle for T where T: HasWindowHandle + HasDisplayHandle + WasmNot
 /// See also [`SurfaceTargetUnsafe`] for unsafe variants.
 #[non_exhaustive]
 pub enum SurfaceTarget<'window> {
-    /// Window handle producer.
+    /// Window and display handle producer.
     ///
     /// If the specified display and window handle are not supported by any of the backends, then the surface
     /// will not be supported by any adapters.
@@ -257,8 +285,18 @@ pub enum SurfaceTarget<'window> {
     /// # Panics
     ///
     /// - On macOS/Metal: will panic if not called on the main thread.
-    /// - On web: will panic if the `raw_window_handle` does not properly refer to a
+    /// - On web: will panic if the [`HasWindowHandle`] does not properly refer to a
     ///   canvas element.
+    /// - On all platforms: If [`crate::InstanceDescriptor::display`] was not [`None`]
+    ///   but its value is not identical to that returned by [`HasDisplayHandle::display_handle()`].
+    DisplayAndWindow(Box<dyn DisplayAndWindowHandle + 'window>),
+
+    /// Window handle producer.
+    ///
+    /// [`HasWindowHandle`]-only version of [`SurfaceTarget::DisplayAndWindow`].
+    ///
+    /// This requires that the display handle was already passed through
+    /// [`crate::InstanceDescriptor::display`].
     Window(Box<dyn WindowHandle + 'window>),
 
     /// Surface from a `web_sys::HtmlCanvasElement`.
@@ -286,12 +324,34 @@ pub enum SurfaceTarget<'window> {
     OffscreenCanvas(web_sys::OffscreenCanvas),
 }
 
+impl fmt::Debug for SurfaceTarget<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DisplayAndWindow(_) => f.debug_tuple("DisplayAndWindow").finish_non_exhaustive(),
+            Self::Window(_) => f.debug_tuple("Window").finish_non_exhaustive(),
+            #[cfg(web)]
+            Self::Canvas(canvas) => f.debug_tuple("Canvas").field(canvas).finish(),
+            #[cfg(web)]
+            Self::OffscreenCanvas(canvas) => {
+                f.debug_tuple("OffscreenCanvas").field(canvas).finish()
+            }
+        }
+    }
+}
+
+impl<'a> SurfaceTarget<'a> {
+    /// Constructor for [`Self::Window`] without consuming a display handle
+    pub fn from_window_without_display(window: impl WindowHandle + 'a) -> Self {
+        Self::Window(Box::new(window))
+    }
+}
+
 impl<'a, T> From<T> for SurfaceTarget<'a>
 where
-    T: WindowHandle + 'a,
+    T: DisplayAndWindowHandle + 'a,
 {
     fn from(window: T) -> Self {
-        Self::Window(Box::new(window))
+        Self::DisplayAndWindow(Box::new(window))
     }
 }
 
@@ -303,11 +363,15 @@ where
 ///
 /// See also [`SurfaceTarget`] for safe variants.
 #[non_exhaustive]
+#[derive(Debug)]
 pub enum SurfaceTargetUnsafe {
     /// Raw window & display handle.
     ///
     /// If the specified display and window handle are not supported by any of the backends, then the surface
     /// will not be supported by any adapters.
+    ///
+    /// If the `raw_display_handle` is not [`None`] here and was not [`None`] in
+    /// [`crate::InstanceDescriptor::display`], their values _must_ be identical.
     ///
     /// # Safety
     ///
@@ -316,9 +380,9 @@ pub enum SurfaceTargetUnsafe {
     ///   [`Surface`] is  dropped.
     RawHandle {
         /// Raw display handle, underlying display must outlive the surface created from this.
-        raw_display_handle: raw_window_handle::RawDisplayHandle,
+        raw_display_handle: Option<raw_window_handle::RawDisplayHandle>,
 
-        /// Raw display handle, underlying window must outlive the surface created from this.
+        /// Raw window handle, underlying window must outlive the surface created from this.
         raw_window_handle: raw_window_handle::RawWindowHandle,
     },
 
@@ -331,7 +395,7 @@ pub enum SurfaceTargetUnsafe {
     ///
     /// - All parameters must point to valid DRM values and remain valid for as long as the resulting [`Surface`] exists.
     /// - The file descriptor (`fd`), plane, connector, and mode configuration must be valid and compatible.
-    #[cfg(all(unix, not(target_vendor = "apple"), not(target_family = "wasm")))]
+    #[cfg(drm)]
     Drm {
         /// The file descriptor of the DRM device.
         fd: i32,
@@ -384,18 +448,38 @@ pub enum SurfaceTargetUnsafe {
 }
 
 impl SurfaceTargetUnsafe {
+    /// Creates a [`SurfaceTargetUnsafe::RawHandle`] from a display and window.
+    ///
+    /// The `display` is optional and may be omitted if it was also passed to
+    /// [`crate::InstanceDescriptor::display`].  If passed to both it must (currently) be identical.
+    ///
+    /// # Safety
+    ///
+    /// - `display` must outlive the resulting surface target
+    ///   (and subsequently the surface created for this target).
+    /// - `window` must outlive the resulting surface target
+    ///   (and subsequently the surface created for this target).
+    pub unsafe fn from_display_and_window(
+        display: &impl HasDisplayHandle,
+        window: &impl HasWindowHandle,
+    ) -> Result<Self, raw_window_handle::HandleError> {
+        Ok(Self::RawHandle {
+            raw_display_handle: Some(display.display_handle()?.as_raw()),
+            raw_window_handle: window.window_handle()?.as_raw(),
+        })
+    }
+
     /// Creates a [`SurfaceTargetUnsafe::RawHandle`] from a window.
     ///
     /// # Safety
     ///
     /// - `window` must outlive the resulting surface target
     ///   (and subsequently the surface created for this target).
-    pub unsafe fn from_window<T>(window: &T) -> Result<Self, raw_window_handle::HandleError>
-    where
-        T: HasDisplayHandle + HasWindowHandle,
-    {
+    pub unsafe fn from_window(
+        window: &impl HasWindowHandle,
+    ) -> Result<Self, raw_window_handle::HandleError> {
         Ok(Self::RawHandle {
-            raw_display_handle: window.display_handle()?.as_raw(),
+            raw_display_handle: None,
             raw_window_handle: window.window_handle()?.as_raw(),
         })
     }

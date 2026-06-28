@@ -2,6 +2,18 @@ use wgpu::{Adapter, Backends, Device, Features, Instance, Limits, Queue};
 
 use crate::{report::AdapterReport, TestParameters};
 
+/// Default device-lost callback installed by [`initialize_device`]. Panics on
+/// any non-[`wgpu::DeviceLostReason::Destroyed`] device loss, which will
+/// cause the test to be treated as a failure.
+///
+/// Tests intentionally provoking device loss should install their own callback
+/// with [`wgpu::Device::set_device_lost_callback`].
+fn default_device_lost_callback(reason: wgpu::DeviceLostReason, message: String) {
+    if reason != wgpu::DeviceLostReason::Destroyed {
+        panic!("Device lost: {message}");
+    }
+}
+
 /// Initialize the logger for the test runner.
 pub fn init_logger() {
     // We don't actually care if it fails
@@ -64,8 +76,7 @@ pub fn initialize_instance(backends: wgpu::Backends, params: &TestParameters) ->
                     wgpu::GlFenceBehavior::Normal
                 },
                 ..Default::default()
-            }
-            .with_env(),
+            },
             // Allow the noop backend to be used in tests. This will not be used unless
             // WGPU_GPU_TESTS_USE_NOOP_BACKEND env var is set, because wgpu-info will not
             // enumerate the noop backend.
@@ -74,18 +85,33 @@ pub fn initialize_instance(backends: wgpu::Backends, params: &TestParameters) ->
             // will chose the noop on wasm32 for some reason.
             noop: wgpu::NoopBackendOptions {
                 enable: !cfg!(target_arch = "wasm32"),
+                ..Default::default()
             },
-        },
+        }
+        .with_env(),
+        #[cfg(not(all(
+            target_arch = "wasm32",
+            any(target_os = "emscripten", feature = "webgl")
+        )))]
         display: None,
         window: None,
+        // Wasm requires a canvas surface below, and create_surface() requires
+        // the `display` to be set even if it's "empty" on Web:
+        #[cfg(all(
+            target_arch = "wasm32",
+            any(target_os = "emscripten", feature = "webgl")
+        ))]
+        display: Some(Box::new(WebDisplayHandle)),
     })
 }
 
 /// Initialize a wgpu adapter, using the given adapter report to match the adapter.
+///
+/// Returns `None` if the adapter from the report is not returned by `enumerate_adapters` due to `InstanceFlags::STRICT_WEBGPU_COMPLIANCE` being set.
 pub async fn initialize_adapter(
     adapter_report: Option<&AdapterReport>,
     params: &TestParameters,
-) -> (Instance, Adapter, Option<SurfaceGuard>) {
+) -> Option<(Instance, Adapter, Option<SurfaceGuard>)> {
     let backends = adapter_report
         .map(|report| Backends::from(report.info.backend))
         .unwrap_or_default();
@@ -134,24 +160,36 @@ pub async fn initialize_adapter(
                 } else {
                     true
                 });
-            let Some(adapter) = adapter else {
-                panic!(
-                    "Could not find adapter with info {:#?} in {:#?}",
-                    adapter_report.map(|r| &r.info),
-                    instance.enumerate_adapters(backends).await.into_iter().map(|a| a.get_info()).collect::<Vec<_>>(),
-                );
-            };
         } else {
             let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: surface.as_ref(),
                 ..Default::default()
-            }).await.unwrap();
+            }).await.ok();
         }
     }
 
-    log::info!("Testing using adapter: {:#?}", adapter.get_info());
+    let Some(adapter) = adapter else {
+        if params
+            .required_instance_flags
+            .contains(wgpu::InstanceFlags::STRICT_WEBGPU_COMPLIANCE)
+        {
+            return None;
+        } else {
+            panic!(
+                "Could not find adapter with info {:#?} in {:#?}",
+                adapter_report.map(|r| &r.info),
+                instance
+                    .enumerate_adapters(backends)
+                    .await
+                    .into_iter()
+                    .map(|a| a.get_info())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    };
 
-    (instance, adapter, surface_guard)
+    log::info!("Testing using adapter: {:#?}", adapter.get_info());
+    Some((instance, adapter, surface_guard))
 }
 
 /// Initialize a wgpu device from a given adapter.
@@ -171,10 +209,14 @@ pub async fn initialize_device(
         })
         .await;
 
-    match bundle {
-        Ok(b) => b,
+    let (device, queue) = match bundle {
+        Ok((device, queue)) => (device, queue),
         Err(e) => panic!("Failed to initialize device: {e}"),
-    }
+    };
+
+    device.set_device_lost_callback(default_device_lost_callback);
+
+    (device, queue)
 }
 
 /// Create a canvas for testing.
@@ -213,5 +255,26 @@ impl SurfaceGuard {
             .unwrap()
             .get_error()
             != web_sys::WebGl2RenderingContext::NO_ERROR
+    }
+}
+
+/// [`raw_window_handle::HasDisplayHandle`] implementation for Web that's [`Send`]+[`Sync`]
+/// because it doesn't own any pointers
+#[cfg(all(
+    target_arch = "wasm32",
+    any(target_os = "emscripten", feature = "webgl")
+))]
+#[derive(Debug)]
+struct WebDisplayHandle;
+
+#[cfg(all(
+    target_arch = "wasm32",
+    any(target_os = "emscripten", feature = "webgl")
+))]
+impl raw_window_handle::HasDisplayHandle for WebDisplayHandle {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(raw_window_handle::DisplayHandle::web())
     }
 }

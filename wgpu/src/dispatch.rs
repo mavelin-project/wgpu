@@ -11,11 +11,22 @@
 //!
 //! [`dispatch_types`]: macro.dispatch_types.html
 
-#![allow(drop_bounds)] // This exists to remind implementors to impl drop.
-#![allow(clippy::too_many_arguments)] // It's fine.
-#![allow(missing_docs, clippy::missing_safety_doc)] // Interfaces are not documented
+#![allow(
+    drop_bounds,
+    reason = "This exists to remind implementors to impl drop."
+)]
+#![allow(clippy::too_many_arguments, reason = "It's fine.")]
+#![allow(
+    missing_docs,
+    clippy::missing_safety_doc,
+    reason = "Interfaces are not documented"
+)]
+#![allow(
+    clippy::len_without_is_empty,
+    reason = "trait is minimal, not ergonomic"
+)]
 
-use crate::{Blas, Tlas, WasmNotSend, WasmNotSendSync};
+use crate::{Blas, Tlas, WasmNotSend, WasmNotSendSync, WriteOnly};
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug, future::Future, hash::Hash, ops::Range, pin::Pin};
@@ -125,13 +136,13 @@ pub trait AdapterInterface: CommonTraits {
 
     fn get_presentation_timestamp(&self) -> crate::PresentationTimestamp;
 
-    #[cfg(wgpu_core)]
     fn cooperative_matrix_properties(&self) -> Vec<crate::wgt::CooperativeMatrixProperties>;
 }
 
 pub trait DeviceInterface: CommonTraits {
     fn features(&self) -> crate::Features;
     fn limits(&self) -> crate::Limits;
+    fn adapter_info(&self) -> crate::AdapterInfo;
 
     fn create_shader_module(
         &self,
@@ -250,6 +261,8 @@ pub trait QueueInterface: CommonTraits {
     fn on_submitted_work_done(&self, callback: BoxSubmittedWorkDoneCallback);
 
     fn compact_blas(&self, blas: &DispatchBlas) -> (Option<u64>, DispatchBlas);
+
+    fn present(&self, detail: &DispatchSurfaceOutputDetail);
 }
 
 pub trait ShaderModuleInterface: CommonTraits {
@@ -266,8 +279,10 @@ pub trait BufferInterface: CommonTraits {
         range: Range<crate::BufferAddress>,
         callback: BufferMapCallback,
     );
-    fn get_mapped_range(&self, sub_range: Range<crate::BufferAddress>)
-        -> DispatchBufferMappedRange;
+    fn get_mapped_range(
+        &self,
+        sub_range: Range<crate::BufferAddress>,
+    ) -> Result<DispatchBufferMappedRange, crate::MapRangeError>;
 
     fn unmap(&self);
 
@@ -286,7 +301,9 @@ pub trait BlasInterface: CommonTraits {
     fn ready_for_compaction(&self) -> bool;
 }
 pub trait TlasInterface: CommonTraits {}
-pub trait QuerySetInterface: CommonTraits {}
+pub trait QuerySetInterface: CommonTraits {
+    fn destroy(&self);
+}
 pub trait PipelineLayoutInterface: CommonTraits {}
 pub trait RenderPipelineInterface: CommonTraits {
     fn get_bind_group_layout(&self, index: u32) -> DispatchBindGroupLayout;
@@ -372,7 +389,7 @@ pub trait CommandEncoderInterface: CommonTraits {
         texture_transitions: &mut dyn Iterator<Item = wgt::TextureTransition<&'a DispatchTexture>>,
     );
 }
-pub trait ComputePassInterface: CommonTraits {
+pub trait ComputePassInterface: CommonTraits + Drop {
     fn set_pipeline(&mut self, pipeline: &DispatchComputePipeline);
     fn set_bind_group(
         &mut self,
@@ -396,9 +413,16 @@ pub trait ComputePassInterface: CommonTraits {
         indirect_buffer: &DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     );
-    fn end(&mut self);
+
+    fn transition_resources<'a>(
+        &mut self,
+        buffer_transitions: &mut dyn Iterator<Item = wgt::BufferTransition<&'a DispatchBuffer>>,
+        texture_transitions: &mut dyn Iterator<
+            Item = wgt::TextureTransition<&'a DispatchTextureView>,
+        >,
+    );
 }
-pub trait RenderPassInterface: CommonTraits {
+pub trait RenderPassInterface: CommonTraits + Drop {
     fn set_pipeline(&mut self, pipeline: &DispatchRenderPipeline);
     fn set_bind_group(
         &mut self,
@@ -416,7 +440,7 @@ pub trait RenderPassInterface: CommonTraits {
     fn set_vertex_buffer(
         &mut self,
         slot: u32,
-        buffer: &DispatchBuffer,
+        buffer: Option<&DispatchBuffer>,
         offset: crate::BufferAddress,
         size: Option<crate::BufferSize>,
     );
@@ -507,8 +531,6 @@ pub trait RenderPassInterface: CommonTraits {
     fn end_pipeline_statistics_query(&mut self);
 
     fn execute_bundles(&mut self, render_bundles: &mut dyn Iterator<Item = &DispatchRenderBundle>);
-
-    fn end(&mut self);
 }
 
 pub trait RenderBundleEncoderInterface: CommonTraits {
@@ -529,7 +551,7 @@ pub trait RenderBundleEncoderInterface: CommonTraits {
     fn set_vertex_buffer(
         &mut self,
         slot: u32,
-        buffer: &DispatchBuffer,
+        buffer: Option<&DispatchBuffer>,
         offset: crate::BufferAddress,
         size: Option<crate::BufferSize>,
     );
@@ -551,6 +573,22 @@ pub trait RenderBundleEncoderInterface: CommonTraits {
     fn finish(self, desc: &crate::RenderBundleDescriptor<'_>) -> DispatchRenderBundle
     where
         Self: Sized;
+
+    /// Object-safe version of `finish` for dyn dispatch through `Box<dyn RenderBundleEncoderInterface>`.
+    ///
+    /// A default implementation cannot be provided here: a default that calls `finish` would
+    /// require `Self: Sized` (to move out of the box), which would remove the method from the
+    /// vtable and break object safety. Every concrete backend must implement this as:
+    /// ```ignore
+    /// fn finish_boxed(self: Box<Self>, desc: &RenderBundleDescriptor<'_>) -> DispatchRenderBundle {
+    ///     (*self).finish(desc)
+    /// }
+    /// ```
+    #[cfg(custom)]
+    fn finish_boxed(
+        self: Box<Self>,
+        desc: &crate::RenderBundleDescriptor<'_>,
+    ) -> DispatchRenderBundle;
 }
 
 pub trait CommandBufferInterface: CommonTraits {}
@@ -570,19 +608,33 @@ pub trait SurfaceInterface: CommonTraits {
 }
 
 pub trait SurfaceOutputDetailInterface: CommonTraits {
-    fn present(&self);
     fn texture_discard(&self);
+    fn texture_release(&self);
 }
 
 pub trait QueueWriteBufferInterface: CommonTraits {
-    fn slice(&self) -> &[u8];
+    fn len(&self) -> usize;
 
-    fn slice_mut(&mut self) -> &mut [u8];
+    /// # Safety
+    ///
+    /// Must only be used on write, not read, mappings.
+    unsafe fn write_slice(&mut self) -> WriteOnly<'_, [u8]>;
 }
 
 pub trait BufferMappedRangeInterface: CommonTraits {
-    fn slice(&self) -> &[u8];
-    fn slice_mut(&mut self) -> &mut [u8];
+    // Used only in wgpu_core's `impl QueueWriteBufferInterface`
+    #[cfg_attr(not(wgpu_core), expect(unused))]
+    fn len(&self) -> usize;
+
+    /// # Safety
+    ///
+    /// Must only be used on read, not write, mappings.
+    unsafe fn read_slice(&self) -> &[u8];
+
+    /// # Safety
+    ///
+    /// Must only be used on write, not read, mappings.
+    unsafe fn write_slice(&mut self) -> WriteOnly<'_, [u8]>;
 
     #[cfg(webgpu)]
     fn as_uint8array(&self) -> &js_sys::Uint8Array;

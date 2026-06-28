@@ -35,7 +35,7 @@ pub(crate) struct GPUTextureDescriptor {
   #[webidl(default = GPUTextureDimension::D2)]
   pub dimension: GPUTextureDimension,
   pub format: GPUTextureFormat,
-  pub usage: GPUTextureUsageFlags,
+  pub usage: u32,
   #[webidl(default = vec![])]
   pub view_formats: Vec<GPUTextureFormat>,
 }
@@ -84,7 +84,7 @@ impl GPUTexture {
 impl Drop for GPUTexture {
   fn drop(&mut self) {
     if let Some(id) = self.default_view_id.take() {
-      self.instance.texture_view_drop(id).unwrap();
+      self.instance.texture_view_drop(id);
     }
     self.instance.texture_drop(self.id);
   }
@@ -273,7 +273,7 @@ pub struct GPUTextureView {
 
 impl Drop for GPUTextureView {
   fn drop(&mut self) {
-    let _ = self.instance.texture_view_drop(self.id);
+    self.instance.texture_view_drop(self.id);
   }
 }
 
@@ -710,7 +710,9 @@ impl From<GPUTextureFormat> for TextureFormat {
   }
 }
 
-pub struct GPUExternalTexture {}
+pub struct GPUExternalTexture {
+  pub id: wgpu_core::id::ExternalTextureId,
+}
 
 impl WebIdlInterfaceConverter for GPUExternalTexture {
   const NAME: &'static str = "GPUExternalTexture";

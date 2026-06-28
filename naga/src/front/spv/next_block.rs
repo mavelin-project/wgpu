@@ -18,6 +18,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
     /// Except for the function's entry block, `block_id` should be the label of
     /// a block we've seen mentioned before, with an entry in
     /// `block_ctx.body_for_label` to tell us which `Body` it contributes to.
+    #[allow(clippy::large_stack_frames)] // TODO(https://github.com/gfx-rs/wgpu/issues/9456)
     pub(in crate::front::spv) fn next_block(
         &mut self,
         block_id: spirv::Word,
@@ -277,7 +278,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         let index_maybe = match *index_expr_data {
                             crate::Expression::Constant(const_handle) => Some(
                                 ctx.gctx()
-                                    .eval_expr_to_u32(ctx.module.constants[const_handle].init)
+                                    .get_const_val(ctx.module.constants[const_handle].init)
                                     .map_err(|_| {
                                         Error::InvalidAccess(crate::Expression::Constant(
                                             const_handle,
@@ -1685,7 +1686,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                 }
                 Op::ExtInst => {
                     use crate::MathFunction as Mf;
-                    use spirv::GLOp as Glo;
+                    use spirv::GlslStd450Op as Glo;
 
                     let base_wc = 5;
                     inst.expect_at_least(base_wc)?;
@@ -1693,7 +1694,12 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let result_type_id = self.next()?;
                     let result_id = self.next()?;
                     let set_id = self.next()?;
-                    if Some(set_id) != self.ext_glsl_id {
+                    if Some(set_id) == self.ext_non_semantic_id {
+                        for _ in 0..inst.wc - 4 {
+                            self.next()?;
+                        }
+                        continue;
+                    } else if Some(set_id) != self.ext_glsl_id {
                         return Err(Error::UnsupportedExtInstSet(set_id));
                     }
                     let inst_id = self.next()?;
@@ -3010,6 +3016,8 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         ctx.expressions.append(expr, span)
                     };
 
+                    emitter.start(ctx.expressions);
+
                     // Create an dot accessor to extract the value from the
                     // result struct __atomic_compare_exchange_result<T> and use that
                     // as the expression for the result_id
@@ -3029,8 +3037,6 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                             },
                         );
                     }
-
-                    emitter.start(ctx.expressions);
 
                     // Create a statement for the op itself
                     let stmt = crate::Statement::Atomic {

@@ -11,7 +11,36 @@ fn check_targets(input: &Input, module: &mut naga::Module, source_code: Option<&
 
     let targets = params.targets.unwrap();
 
-    let capabilities = params.capabilities.unwrap_or_default();
+    let mut capabilities = params.capabilities.unwrap_or_default();
+    {
+        let mut allowed_capabilities = naga::valid::Capabilities::all();
+        if targets.contains(Targets::GLSL) {
+            allowed_capabilities &= naga::back::glsl::supported_capabilities();
+        }
+        if targets.contains(Targets::HLSL) {
+            allowed_capabilities &= naga::back::hlsl::supported_capabilities();
+        }
+        if targets.contains(Targets::SPIRV) {
+            allowed_capabilities &= naga::back::spv::supported_capabilities();
+        }
+        if targets.contains(Targets::WGSL) {
+            allowed_capabilities &= naga::back::wgsl::supported_capabilities();
+        }
+        if targets.contains(Targets::METAL) {
+            allowed_capabilities &= naga::back::msl::supported_capabilities();
+        }
+        if capabilities == naga::valid::Capabilities::all() {
+            capabilities = allowed_capabilities;
+        } else {
+            let diff = capabilities - allowed_capabilities;
+            if !diff.is_empty() {
+                panic!(
+                    "Invalid capabilities for backends on shader {name}: used {diff:?} which aren't supported by one of the targets.
+Note: this is an issue with snapshot configuration, not code. If you added a new capability, add it to `supported_capabilities()` in each backend where it is supported"
+                );
+            }
+        }
+    }
 
     {
         if targets.contains(Targets::IR) {
@@ -57,6 +86,12 @@ fn check_targets(input: &Input, module: &mut naga::Module, source_code: Option<&
             })
     };
 
+    let shared_info = WriterSharedOptions {
+        mesh_output_validation: params.mesh_output_validation,
+        task_limits: params.task_limits,
+        bounds_checks_policies: params.bounds_check_policies,
+    };
+
     {
         if targets.contains(Targets::ANALYSIS) {
             let config = ron::ser::PrettyConfig::default().new_line("\n".to_string());
@@ -84,8 +119,8 @@ fn check_targets(input: &Input, module: &mut naga::Module, source_code: Option<&
             &info,
             debug_info,
             &params.spv,
-            params.bounds_check_policies,
             &params.pipeline_constants,
+            &shared_info,
         );
     }
 
@@ -96,8 +131,8 @@ fn check_targets(input: &Input, module: &mut naga::Module, source_code: Option<&
             &info,
             &params.msl,
             &params.msl_pipeline,
-            params.bounds_check_policies,
             &params.pipeline_constants,
+            &shared_info,
         );
     }
 
@@ -155,6 +190,7 @@ fn check_targets(input: &Input, module: &mut naga::Module, source_code: Option<&
             &params.hlsl,
             &params.pipeline_constants,
             frag_ep,
+            &shared_info,
         );
     }
 
@@ -163,18 +199,129 @@ fn check_targets(input: &Input, module: &mut naga::Module, source_code: Option<&
     }
 }
 
+fn spirv_cross_stage_name(stage: naga::ShaderStage) -> &'static str {
+    match stage {
+        naga::ShaderStage::Vertex => "vert",
+        naga::ShaderStage::Fragment => "frag",
+        naga::ShaderStage::Compute => "comp",
+        naga::ShaderStage::Task => "task",
+        naga::ShaderStage::Mesh => "mesh",
+        naga::ShaderStage::RayGeneration => "rgen",
+        naga::ShaderStage::Miss => "rmiss",
+        naga::ShaderStage::AnyHit => "rahit",
+        naga::ShaderStage::ClosestHit => "rchit",
+    }
+}
+
+fn run_spirv_cross(
+    spv_binary: &[u32],
+    entry_point: &str,
+    stage: naga::ShaderStage,
+) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let stage_name = spirv_cross_stage_name(stage);
+    let bytes: &[u8] = bytemuck::cast_slice(spv_binary);
+
+    let mut child = Command::new("spirv-cross")
+        .args([
+            "-V",
+            "--version",
+            "460",
+            "--entry",
+            entry_point,
+            "--stage",
+            stage_name,
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect(
+            "Failed to execute spirv-cross. Install it via the Vulkan SDK \
+             or from https://github.com/KhronosGroup/SPIRV-Cross",
+        );
+
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+
+    if !output.status.success() {
+        let mut commented = String::from("// spirv-cross error:\n");
+        for line in stderr.lines() {
+            commented.push_str(&format!("// {line}\n"));
+        }
+        Err(commented)
+    } else {
+        Ok(stdout)
+    }
+}
+
+/// Writes GLSL output generated by SPIRV-Cross for the given SPIR-V binary.
+///
+/// Behavior:
+/// - For multiple entry points, each GLSL output is prefixed with a comment block
+///   indicating the entry point name and shader stage (e.g., `// Entry point: "main" (frag) //`).
+/// - For a single entry point, no header is added (cleaner output for single-shader files).
+/// - On SPIRV-Cross failure, stderr is captured as commented lines in the output file,
+///   and the function continues to write remaining entry points. This ensures test
+///   snapshots are always generated even when translation fails.
+/// - For a module with no entry points, a comment is written instead of an empty file.
+fn write_spirv_cross_glsl(
+    input: &Input,
+    spv_binary: &[u32],
+    entry_points: &[(String, naga::ShaderStage)],
+    extension: &str,
+) {
+    let multiple = entry_points.len() > 1;
+    let mut output = String::new();
+
+    if entry_points.is_empty() {
+        output.push_str("// No entry points; nothing to translate.\n");
+    }
+
+    for (i, (name, stage)) in entry_points.iter().enumerate() {
+        if multiple {
+            if i > 0 {
+                output.push('\n');
+            }
+            let stage_name = spirv_cross_stage_name(*stage);
+            let inner = format!(" Entry point: \"{name}\" ({stage_name}) ");
+            let width = inner.len() + "//".len() * 2;
+            let bar: String = "/".repeat(width);
+            output.push_str(&bar);
+            output.push('\n');
+            output.push_str(&format!("//{inner}//"));
+            output.push('\n');
+            output.push_str(&bar);
+            output.push('\n');
+        }
+
+        match run_spirv_cross(spv_binary, name, *stage) {
+            Ok(glsl) => output.push_str(&glsl),
+            Err(err) => output.push_str(&err),
+        }
+    }
+
+    input.write_output_file("spv", extension, output, DIR_OUT);
+}
+
 fn write_output_spv(
     input: &Input,
     module: &naga::Module,
     info: &naga::valid::ModuleInfo,
     debug_info: Option<naga::back::spv::DebugInfo>,
     params: &SpirvOutParameters,
-    bounds_check_policies: naga::proc::BoundsCheckPolicies,
     pipeline_constants: &naga::back::PipelineConstants,
+    shared_options: &WriterSharedOptions,
 ) {
     use naga::back::spv;
 
-    let options = params.to_options(bounds_check_policies, debug_info);
+    let options = params.to_options(shared_options, debug_info);
 
     let (module, info) =
         naga::back::pipeline_constants::process_overrides(module, info, None, pipeline_constants)
@@ -186,7 +333,7 @@ fn write_output_spv(
                 entry_point: ep.name.clone(),
                 shader_stage: ep.stage,
             };
-            write_output_spv_inner(
+            let spv_binary = write_output_spv_inner(
                 input,
                 &module,
                 &info,
@@ -194,9 +341,21 @@ fn write_output_spv(
                 Some(&pipeline_options),
                 &format!("{}.spvasm", ep.name),
             );
+            write_spirv_cross_glsl(
+                input,
+                &spv_binary,
+                &[(ep.name.clone(), ep.stage)],
+                &format!("{}.spvasm.glsl", ep.name),
+            );
         }
     } else {
-        write_output_spv_inner(input, &module, &info, &options, None, "spvasm");
+        let spv_binary = write_output_spv_inner(input, &module, &info, &options, None, "spvasm");
+        let entry_points: Vec<(String, naga::ShaderStage)> = module
+            .entry_points
+            .iter()
+            .map(|ep| (ep.name.clone(), ep.stage))
+            .collect();
+        write_spirv_cross_glsl(input, &spv_binary, &entry_points, "spvasm.glsl");
     }
 }
 
@@ -207,12 +366,12 @@ fn write_output_spv_inner(
     options: &naga::back::spv::Options<'_>,
     pipeline_options: Option<&naga::back::spv::PipelineOptions>,
     extension: &str,
-) {
+) -> Vec<u32> {
     use naga::back::spv;
     use rspirv::binary::Disassemble;
     println!("Generating SPIR-V for {:?}", input.file_name);
     let spv = spv::write_vec(module, info, options, pipeline_options).unwrap();
-    let dis = rspirv::dr::load_words(spv)
+    let dis = rspirv::dr::load_words(spv.clone())
         .expect("Produced invalid SPIR-V")
         .disassemble();
     // HACK escape CR/LF if source code is in side.
@@ -223,6 +382,7 @@ fn write_output_spv_inner(
         dis
     };
     input.write_output_file("spv", extension, dis, DIR_OUT);
+    spv
 }
 
 fn write_output_msl(
@@ -231,8 +391,8 @@ fn write_output_msl(
     info: &naga::valid::ModuleInfo,
     options: &naga::back::msl::Options,
     pipeline_options: &naga::back::msl::PipelineOptions,
-    bounds_check_policies: naga::proc::BoundsCheckPolicies,
     pipeline_constants: &naga::back::PipelineConstants,
+    shared_options: &WriterSharedOptions,
 ) {
     use naga::back::msl;
 
@@ -243,7 +403,9 @@ fn write_output_msl(
             .expect("override evaluation failed");
 
     let mut options = options.clone();
-    options.bounds_check_policies = bounds_check_policies;
+    options.bounds_check_policies = shared_options.bounds_checks_policies;
+    options.mesh_shader_primitive_indices_clamp = shared_options.mesh_output_validation;
+    options.task_dispatch_limits = shared_options.task_limits;
     let (string, tr_info) = msl::write_string(&module, &info, &options, pipeline_options)
         .unwrap_or_else(|err| panic!("Metal write failed: {err}"));
 
@@ -253,7 +415,7 @@ fn write_output_msl(
         }
     }
 
-    input.write_output_file("msl", "msl", string, DIR_OUT);
+    input.write_output_file("msl", "metal", string, DIR_OUT);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,6 +466,7 @@ fn write_output_hlsl(
     options: &naga::back::hlsl::Options,
     pipeline_constants: &naga::back::PipelineConstants,
     frag_ep: Option<naga::back::hlsl::FragmentEntryPoint>,
+    shared_info: &WriterSharedOptions,
 ) {
     use naga::back::hlsl;
 
@@ -313,9 +476,13 @@ fn write_output_hlsl(
         naga::back::pipeline_constants::process_overrides(module, info, None, pipeline_constants)
             .expect("override evaluation failed");
 
+    let mut options = options.clone();
+    options.mesh_shader_primitive_indices_clamp = shared_info.mesh_output_validation;
+    options.task_dispatch_limits = shared_info.task_limits;
+
     let mut buffer = String::new();
     let pipeline_options = Default::default();
-    let mut writer = hlsl::Writer::new(&mut buffer, options, &pipeline_options);
+    let mut writer = hlsl::Writer::new(&mut buffer, &options, &pipeline_options);
     let reflection_info = writer
         .write(&module, &info, frag_ep.as_ref())
         .expect("HLSL write failed");
@@ -335,13 +502,18 @@ fn write_output_hlsl(
             naga::ShaderStage::Vertex => &mut config.vertex,
             naga::ShaderStage::Fragment => &mut config.fragment,
             naga::ShaderStage::Compute => &mut config.compute,
-            naga::ShaderStage::Task | naga::ShaderStage::Mesh => unreachable!(),
+            naga::ShaderStage::Task => &mut config.task,
+            naga::ShaderStage::Mesh => &mut config.mesh,
+            naga::ShaderStage::RayGeneration
+            | naga::ShaderStage::AnyHit
+            | naga::ShaderStage::ClosestHit
+            | naga::ShaderStage::Miss => unreachable!(),
         }
         .push(hlsl_snapshots::ConfigItem {
             entry_point: name.clone(),
             target_profile: format!(
                 "{}_{}",
-                ep.stage.to_hlsl_str(),
+                naga::back::hlsl::shader_stage_to_hlsl_str(ep.stage),
                 options.shader_model.to_str()
             ),
         });
@@ -386,7 +558,10 @@ fn convert_snapshots_wgsl() {
             Ok(mut module) => check_targets(&input, &mut module, Some(&source)),
             Err(e) => panic!(
                 "{}",
-                e.emit_to_string_with_path(&source, input.input_path(DIR_IN))
+                e.emit_to_string_with_path(
+                    &source,
+                    &input.input_path(DIR_IN).display().to_string()
+                )
             ),
         }
     }
@@ -435,7 +610,6 @@ fn convert_snapshots_spv() {
 // While we _can_ run this test under miri, it is extremely slow (>5 minutes),
 // and naga isn't the primary target for miri testing, so we disable it.
 #[cfg_attr(miri, ignore)]
-#[allow(unused_variables)]
 #[test]
 fn convert_snapshots_glsl() {
     let _ = env_logger::try_init();

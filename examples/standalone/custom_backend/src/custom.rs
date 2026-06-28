@@ -128,6 +128,10 @@ impl DeviceInterface for CustomDevice {
         unimplemented!()
     }
 
+    fn adapter_info(&self) -> wgpu::AdapterInfo {
+        unimplemented!()
+    }
+
     fn create_shader_module(
         &self,
         desc: wgpu::ShaderModuleDescriptor<'_>,
@@ -374,6 +378,10 @@ impl QueueInterface for CustomQueue {
     }
 
     fn compact_blas(&self, _blas: &DispatchBlas) -> (Option<u64>, DispatchBlas) {
+        unimplemented!()
+    }
+
+    fn present(&self, _detail: &wgpu::custom::DispatchSurfaceOutputDetail) {
         unimplemented!()
     }
 }

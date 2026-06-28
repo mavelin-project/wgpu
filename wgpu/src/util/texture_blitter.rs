@@ -14,6 +14,7 @@ use crate::{
 
 /// A builder for the [`TextureBlitter`] utility.
 /// If you want the default [`TextureBlitter`] use [`TextureBlitter::new`] instead.
+#[derive(Debug)]
 pub struct TextureBlitterBuilder<'a> {
     device: &'a Device,
     format: TextureFormat,
@@ -93,7 +94,7 @@ impl<'a> TextureBlitterBuilder<'a> {
             .device
             .create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("wgpu::util::TextureBlitter::pipeline_layout"),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[Some(&bind_group_layout)],
                 immediate_size: 0,
             });
 
@@ -148,6 +149,7 @@ impl<'a> TextureBlitterBuilder<'a> {
 /// - Textures are in incompatible formats.
 /// - Textures are of different sizes.
 /// - Your copy destination is the surface texture and does not have the `COPY_DST` usage.
+#[derive(Debug)]
 pub struct TextureBlitter {
     pipeline: RenderPipeline,
     bind_group_layout: BindGroupLayout,

@@ -26,6 +26,7 @@ impl Global {
         // Lock command encoder for recording
         let cmd_enc = hub.command_encoders.get(command_encoder_id);
         let mut cmd_buf_data = cmd_enc.data.lock();
+        let snatch_guard = cmd_enc.device.snatchable_lock.read();
         cmd_buf_data.push_with(|| -> Result<_, TransitionResourcesError> {
             Ok(ArcCommand::TransitionResources {
                 buffer_transitions: buffer_transitions
@@ -38,8 +39,10 @@ impl Global {
                     .collect::<Result<_, TransitionResourcesError>>()?,
                 texture_transitions: texture_transitions
                     .map(|t| {
+                        let texture = self.resolve_texture_id(t.texture);
+                        texture.check_valid(&snatch_guard)?;
                         Ok(wgt::TextureTransition {
-                            texture: self.resolve_texture_id(t.texture)?,
+                            texture,
                             selector: t.selector,
                             state: t.state,
                         })
@@ -108,12 +111,11 @@ pub enum TransitionResourcesError {
 
 impl WebGpuError for TransitionResourcesError {
     fn webgpu_error_type(&self) -> ErrorType {
-        let e: &dyn WebGpuError = match self {
-            Self::Device(e) => e,
-            Self::EncoderState(e) => e,
-            Self::InvalidResource(e) => e,
-            Self::ResourceUsage(e) => e,
-        };
-        e.webgpu_error_type()
+        match self {
+            Self::Device(e) => e.webgpu_error_type(),
+            Self::EncoderState(e) => e.webgpu_error_type(),
+            Self::InvalidResource(e) => e.webgpu_error_type(),
+            Self::ResourceUsage(e) => e.webgpu_error_type(),
+        }
     }
 }

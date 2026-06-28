@@ -21,7 +21,7 @@ use std::{
     slice,
     sync::Arc,
 };
-use wgc::command::PointerReferences;
+use wgc::{command::PointerReferences, device::trace::DiskTraceLoader};
 
 #[derive(serde::Deserialize)]
 enum ExpectedData {
@@ -98,7 +98,7 @@ impl Test<'_> {
 
         println!("\t\t\tRunning...");
         for action in self.actions {
-            player.process(&device, &queue, action, dir);
+            player.process(&device, &queue, action, DiskTraceLoader::new(dir));
         }
         println!("\t\t\tMapping...");
         for expect in &self.expectations {
@@ -181,15 +181,11 @@ impl Corpus {
             for test_path in &corpus.tests {
                 println!("\t\tTest '{test_path:?}'");
 
-                let instance_desc = wgt::InstanceDescriptor::from_env_or_default();
+                let instance_desc = wgt::InstanceDescriptor::new_without_display_handle_from_env();
                 let instance_flags = instance_desc.flags;
                 let instance = wgc::instance::Instance::new("test", instance_desc, None);
                 let adapter = match instance.request_adapter(
-                    &wgt::RequestAdapterOptions {
-                        power_preference: wgt::PowerPreference::None,
-                        force_fallback_adapter: false,
-                        compatible_surface: None,
-                    },
+                    &wgt::RequestAdapterOptions::default(),
                     wgt::Backends::from(backend),
                 ) {
                     Ok(adapter) => Arc::new(adapter),

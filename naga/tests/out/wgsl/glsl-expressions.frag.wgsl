@@ -7,7 +7,7 @@ struct a_buf {
 }
 
 struct TestStruct {
-    array_: array<vec4<u32>, 2>,
+    array: array<vec4<u32>, 2>,
 }
 
 struct FragmentOutput {
@@ -266,16 +266,16 @@ fn testUnaryOpMat(a_16: mat3x3<f32>) {
 
     a_17 = a_16;
     let _e3 = a_17;
-    v_8 = -(_e3);
-    let _e5 = a_17;
-    let _e7 = vec3(1f);
-    let _e9 = (_e5 - mat3x3<f32>(_e7, _e7, _e7));
-    a_17 = _e9;
-    v_8 = _e9;
-    let _e10 = a_17;
-    let _e12 = vec3(1f);
-    a_17 = (_e10 - mat3x3<f32>(_e12, _e12, _e12));
+    v_8 = (-1f * _e3);
+    let _e6 = a_17;
+    let _e8 = vec3(1f);
+    let _e10 = (_e6 - mat3x3<f32>(_e8, _e8, _e8));
+    a_17 = _e10;
     v_8 = _e10;
+    let _e11 = a_17;
+    let _e13 = vec3(1f);
+    a_17 = (_e11 - mat3x3<f32>(_e13, _e13, _e13));
+    v_8 = _e11;
     return;
 }
 
@@ -402,7 +402,7 @@ fn indexConstantNonConstantIndex(i: i32) {
 
     i_1 = i;
     let _e2 = i_1;
-    let _e7 = local_5.array_[_e2];
+    let _e7 = local_5.array[_e2];
     a_26 = _e7;
     return;
 }
