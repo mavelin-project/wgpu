@@ -57,7 +57,7 @@ impl GlutinContext {
             glutin::context::RawContext::Egl(ctx) => ctx as *mut ffi::c_void,
 	    #[cfg(all(gles_glx_backend, not(macos_platform), not(windows)))]
             glutin::context::RawContext::Glx(ctx) => ctx as *mut ffi::c_void,
-            #[cfg(windows_platofmr)]
+            #[cfg(windows)]
             glutin::context::RawContext::Wgl(ctx) => ctx as *mut ffi::c_void,
 	    #[cfg(macos_platform)]
             glutin::context::RawContext::Cgl(ctx) => ctx as *mut ffi::c_void,
