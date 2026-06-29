@@ -53,12 +53,13 @@ impl GlutinContext {
         };
 
         match raw_context {
+	    #[cfg(not(macos_platform))]
             glutin::context::RawContext::Egl(ctx) => ctx as *mut ffi::c_void,
-            #[cfg(gles_glx_backend)]
+	    #[cfg(all(gles_glx_backend, not(macos_platform), not(windows_platform)))]
             glutin::context::RawContext::Glx(ctx) => ctx as *mut ffi::c_void,
-            #[cfg(gles_wgl_backend)]
+            #[cfg(windows_platofmr)]
             glutin::context::RawContext::Wgl(ctx) => ctx as *mut ffi::c_void,
-            #[cfg(gles_cgl_backend)]
+	    #[cfg(macos_platform)]
             glutin::context::RawContext::Cgl(ctx) => ctx as *mut ffi::c_void,
         }
     }
@@ -176,12 +177,11 @@ impl Drop for Inner {
 fn preference_default(
     window_handle: raw_window_handle::RawWindowHandle,
 ) -> glutin::display::DisplayApiPreference {
-    #[cfg(all(gles_wgl_backend, gles_egl_backend))]
     let preference = glutin::display::DisplayApiPreference::WglThenEgl(Some(window_handle));
-    #[cfg(all(gles_wgl_backend, not(gles_egl_backend)))]
-    let preference = glutin::display::DisplayApiPreference::Wgl(Some(window_handle.as_raw()));
-    #[cfg(all(not(gles_wgl_backend), gles_egl_backend))]
-    let preference = glutin::display::DisplayApiPreference::Egl;
+    //#[cfg(all(gles_wgl_backend, not(gles_egl_backend)))]
+    //let preference = glutin::display::DisplayApiPreference::Wgl(Some(window_handle.as_raw()));
+    //#[cfg(all(not(gles_wgl_backend), gles_egl_backend))]
+    //let preference = glutin::display::DisplayApiPreference::Egl;
 
     preference
 }
