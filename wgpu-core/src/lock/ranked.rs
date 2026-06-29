@@ -80,6 +80,7 @@ pub struct Mutex<T> {
 /// For details, see [the module documentation][self].
 pub struct MutexGuard<'a, T> {
     inner: parking_lot::MutexGuard<'a, T>,
+    #[allow(unfulfilled_lint_expectations)]
     #[cfg_attr(not(miri), expect(unused))] // but `Drop` has important side effects
     saved: LockStateGuard,
 }

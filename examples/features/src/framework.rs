@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use wgpu::{Instance, Surface};
+use wgpu::{rwh::HasWindowHandle, Instance, Surface};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -268,7 +268,8 @@ impl ExampleContext {
         log::info!("Initializing wgpu...");
 
         let instance_descriptor =
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle));
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle))
+                .with_window_handle(Box::new(window.clone()));
         let instance = wgpu::Instance::new(instance_descriptor);
         surface.pre_adapter(&instance, window);
         let adapter = get_adapter_with_capabilities_or_from_env(

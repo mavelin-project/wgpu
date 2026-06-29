@@ -8,6 +8,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 /// The amount of time to wait while trying to obtain a lock to the adapter context
 const CONTEXT_LOCK_TIMEOUT_SECS: u64 = 6;
 
+#[derive(Debug)]
 struct GlutinContext {
     current_context: Option<glutin::context::PossiblyCurrentContext>,
     not_current_context: Option<glutin::context::NotCurrentContext>,
@@ -52,10 +53,9 @@ impl GlutinContext {
         };
 
         match raw_context {
-            #[cfg(gles_egl_backend)]
             glutin::context::RawContext::Egl(ctx) => ctx as *mut ffi::c_void,
-            // #[cfg(gles_glx_backend)]
-            // glutin::context::RawContext::Glx(ctx) => ctx as *mut ffi::c_void,
+            #[cfg(gles_glx_backend)]
+            glutin::context::RawContext::Glx(ctx) => ctx as *mut ffi::c_void,
             #[cfg(gles_wgl_backend)]
             glutin::context::RawContext::Wgl(ctx) => ctx as *mut ffi::c_void,
             #[cfg(gles_cgl_backend)]
@@ -64,6 +64,7 @@ impl GlutinContext {
     }
 }
 
+#[derive(Debug)]
 pub struct AdapterContext {
     inner: Arc<Mutex<Inner>>,
 }
@@ -110,6 +111,7 @@ impl AdapterContext {
     }
 }
 
+#[derive(Debug)]
 pub struct AdapterContextLock<'a> {
     inner: MutexGuard<'a, Inner>,
 }
@@ -128,6 +130,7 @@ impl<'a> Drop for AdapterContextLock<'a> {
     }
 }
 
+#[derive(Debug)]
 struct Inner {
     gl: ManuallyDrop<glow::Context>,
     context: GlutinContext,
@@ -187,11 +190,11 @@ fn preference_default(
 fn preference_default(
     _window_handle: raw_window_handle::RawWindowHandle,
 ) -> glutin::display::DisplayApiPreference {
-    // TODO: Add Surport for x11 gl
-    // #[cfg(all(gles_egl_backend, gles_glx_backend))]
-    // let preference = glutin::display::DisplayApiPreference::GlxThenEgl()
-    // #[cfg(all(gles_glx_backend, not(gles_egl_backend)))]
-    // let preference = glutin::display::DisplayApiPreference::Glx
+    // TODO: Add Support for x11 gl
+    #[cfg(all(gles_egl_backend, gles_glx_backend))]
+    let preference = glutin::display::DisplayApiPreference::GlxThenEgl(alloc::boxed::Box::new(|_| {}));
+    #[cfg(all(gles_glx_backend, not(gles_egl_backend)))]
+    let preference = glutin::display::DisplayApiPreference::Glx;
     #[cfg(all(gles_egl_backend, not(gles_glx_backend)))]
     let preference = glutin::display::DisplayApiPreference::Egl;
 
@@ -202,12 +205,13 @@ fn preference_default(
 fn preference_default(
     _window_handle: raw_window_handle::RawWindowHandle,
 ) -> glutin::display::DisplayApiPreference {
-    #[cfg(all(gles_cgl_backend))]
+    // #[cfg(all(gles_cgl_backend))]
     let preference = glutin::display::DisplayApiPreference::Cgl;
 
     preference
 }
 
+#[derive(Debug)]
 pub struct Instance {
     inner: Arc<Mutex<Inner>>,
     display: GlutinDisplay,
@@ -317,8 +321,7 @@ impl crate::Instance for Instance {
         })?;
         let mut gl = unsafe {
             glow::Context::from_loader_function(|name| {
-                display.get_proc_address(ffi::CStr::from_bytes_with_nul_unchecked(name.as_bytes()))
-                    as _
+                display.get_proc_address(ffi::CStr::from_bytes_with_nul_unchecked(name.as_bytes())).cast()
             })
         };
 
@@ -448,11 +451,13 @@ pub struct SwapchainInner {
     sample_type: wgt::TextureSampleType,
 }
 
+#[derive(Debug)]
 pub enum Swapchain {
     Parent(SwapchainInner),
     Other(GlutinWindowSurface, SwapchainInner),
 }
 
+#[derive(Debug)]
 pub struct Surface {
     display: glutin::display::Display,
     window: raw_window_handle::RawWindowHandle,
@@ -636,7 +641,7 @@ impl crate::Surface for Surface {
                     unsafe { NonZeroU32::new_unchecked(config.extent.height) },
                 );
 
-                self.create_swapchain(device, config, &gl)
+                self.create_swapchain(device, config, gl)
                     .map(|sc_inner| Swapchain::Other(sc_surface, sc_inner))?
             }
             Some(Swapchain::Parent(sc)) => {
@@ -654,7 +659,7 @@ impl crate::Surface for Surface {
                     unsafe { NonZeroU32::new_unchecked(config.extent.height) },
                 );
 
-                self.create_swapchain(device, config, &gl)
+                self.create_swapchain(device, config, gl)
                     .map(Swapchain::Parent)?
             }
             None if self.window == self.parent => {
@@ -737,7 +742,7 @@ impl crate::Surface for Surface {
         &self,
         _timeout_ms: Option<Duration>,
         _fence: &super::Fence,
-    ) -> Result<Option<crate::AcquiredSurfaceTexture<super::Api>>, crate::SurfaceError> {
+    ) -> Result<crate::AcquiredSurfaceTexture<super::Api>, crate::SurfaceError> {
         let swapchain = self.swapchain.read();
         let sc = match swapchain.as_ref().ok_or(crate::SurfaceError::Other(
             "Surface has no swap-chain configured",
@@ -761,10 +766,10 @@ impl crate::Surface for Surface {
                 depth: 1,
             },
         };
-        Ok(Some(crate::AcquiredSurfaceTexture {
+        Ok(crate::AcquiredSurfaceTexture {
             texture,
             suboptimal: false,
-        }))
+        })
     }
 
     unsafe fn discard_texture(&self, _texture: super::Texture) {}

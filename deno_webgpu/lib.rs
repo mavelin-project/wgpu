@@ -203,6 +203,7 @@ impl GPU {
             noop: wgpu_types::NoopBackendOptions::default(),
           },
           display: None,
+          window: None,
         },
         None,
       )));

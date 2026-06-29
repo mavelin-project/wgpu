@@ -58,7 +58,7 @@ metal = ["wgpu-core?/metal"]
 vulkan = ["wgpu-core?/vulkan"]
 
 ## Enables the OpenGL/GLES backend on Windows, Linux, Android, and Emscripten.
-gles = ["wgpu-core?/gles"]
+gles = ["wgpu-core?/gles", "wgpu-hal?/gles"]
 
 ## Enables the WebGPU backend on WebAssembly.
 webgpu = [
@@ -233,7 +233,7 @@ static_assertions.workspace = true
 # Needed for only wgpu-core backend. Not optional as only wgpu-core backend exists on native platforms.
 wgpu-core = { workspace = true, features = [
     "renderdoc",
-    "wgsl", # needed for indirect draw/dispatch validation
+    "wgsl",            # needed for indirect draw/dispatch validation
     "portable-atomic",
 ] }
 wgpu-hal.workspace = true

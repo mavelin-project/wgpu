@@ -91,6 +91,7 @@ impl InstanceDescriptor {
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),
             display: None,
+            window: None,
         }
     }
 
@@ -133,7 +134,7 @@ impl InstanceDescriptor {
             memory_budget_thresholds: MemoryBudgetThresholds::default(),
             backend_options,
             display: self.display,
-            window: None,
+            window: self.window,
         }
     }
 
@@ -142,6 +143,15 @@ impl InstanceDescriptor {
     pub fn with_display_handle(self, display: alloc::boxed::Box<dyn WgpuHasDisplayHandle>) -> Self {
         Self {
             display: Some(display),
+            ..self
+        }
+    }
+
+    /// Appends the given `display` object to the descriptor.
+    #[must_use]
+    pub fn with_window_handle(self, window: alloc::boxed::Box<dyn WgpuHasWindowHandle>) -> Self {
+        Self {
+            window: Some(window),
             ..self
         }
     }

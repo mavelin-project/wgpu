@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use wgpu::Limits;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -19,15 +20,32 @@ struct State {
 
 impl State {
     async fn new(display: OwnedDisplayHandle, window: Arc<Window>) -> State {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(display),
-        ));
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display))
+                .with_window_handle(Box::new(window.clone())),
+        );
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .unwrap();
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: Limits {
+                    max_compute_workgroup_size_x: 0,
+                    max_compute_workgroup_size_y: 0,
+                    max_compute_workgroup_size_z: 0,
+                    max_compute_workgroups_per_dimension: 0,
+                    max_compute_invocations_per_workgroup: 0,
+                    max_compute_workgroup_storage_size: 0,
+                    max_storage_buffer_binding_size: 0,
+                    max_storage_buffers_per_shader_stage: 0,
+                    max_storage_textures_per_shader_stage: 0,
+                    max_dynamic_storage_buffers_per_pipeline_layout: 0,
+                    ..Limits::downlevel_defaults()
+                },
+                ..wgpu::DeviceDescriptor::default()
+            })
             .await
             .unwrap();
 

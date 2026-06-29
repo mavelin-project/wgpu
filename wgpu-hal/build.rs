@@ -31,6 +31,10 @@ fn main() {
                 emuscripten_platform
             )
         ) },
+        gles_egl_backend: { all(feature = "gles", any(windows, unix), not(apple), not(wasm_platform)) },
+        gles_glx_backend: { all(feature = "gles", feature = "glx", not(wasm_platform)) },
+        gles_wgl_backend: { all(feature = "gles", windows, not(wasm_platform)) },
+        gles_cgl_backend: { all(feature = "gles", macos_platform, not(wasm_platform)) },
         metal: { all(target_vendor = "apple", feature = "metal") },
         vulkan: { all(not(target_arch = "wasm32"), feature = "vulkan") },
         drm: { all(

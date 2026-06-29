@@ -11,15 +11,45 @@ async fn run(_path: Option<String>) {
     let mut texture_data = Vec::<u8>::with_capacity(TEXTURE_DIMS.0 * TEXTURE_DIMS.1 * 4);
 
     let instance = wgpu::Instance::default();
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await
-        .unwrap();
+    let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+
+    let mut chosen_adapter = None;
+    for adapter in adapters {
+        println!("{adapter:?}");
+        // if let Some(surface) = surface {
+        //     if !adapter.is_surface_supported(surface) {
+        //         continue;
+        //     }
+        // }
+
+        // let required_features = *required_features;
+        let adapter_features = adapter.features();
+        // if !adapter_features.contains(required_features) {
+        //     continue;
+        // } else {
+            chosen_adapter = Some(adapter);
+        //     break;
+        // }
+    }
+
+    let adapter = chosen_adapter.expect("No suitable GPU adapters found on the system!");
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            required_limits: wgpu::Limits {
+                    max_compute_workgroup_size_x: 0,
+                    max_compute_workgroup_size_y: 0,
+                    max_compute_workgroup_size_z: 0,
+                    max_compute_workgroups_per_dimension: 0,
+                    max_compute_invocations_per_workgroup: 0,
+                    max_compute_workgroup_storage_size: 0,
+                    max_storage_buffer_binding_size: 0,
+                    max_storage_buffers_per_shader_stage: 0,
+                    max_storage_textures_per_shader_stage: 0,
+                    max_dynamic_storage_buffers_per_pipeline_layout: 0,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,
