@@ -105,7 +105,6 @@ vulkan = [
     "windows/Win32",
 ]
 gles = [
-    "glx",
     "dep:arrayvec",
     "dep:bytemuck",
     "dep:glow",
@@ -164,7 +163,7 @@ dx12 = [
 ### Misc Other Features ###
 ###########################
 
-glx = []
+x11 = []
 static-dxc = ["dep:mach-dxcompiler-rs"]
 renderdoc = ["dep:libloading", "dep:renderdoc-sys"]
 fragile-send-sync-non-atomic-wasm = [

@@ -55,7 +55,7 @@ impl GlutinContext {
         match raw_context {
 	    #[cfg(not(macos_platform))]
             glutin::context::RawContext::Egl(ctx) => ctx as *mut ffi::c_void,
-	    #[cfg(all(gles_glx_backend, not(macos_platform), not(windows)))]
+	    #[cfg(all(feature = "x11", not(macos_platform), not(windows)))]
             glutin::context::RawContext::Glx(ctx) => ctx as *mut ffi::c_void,
             #[cfg(windows)]
             glutin::context::RawContext::Wgl(ctx) => ctx as *mut ffi::c_void,
@@ -191,11 +191,11 @@ fn preference_default(
     _window_handle: raw_window_handle::RawWindowHandle,
 ) -> glutin::display::DisplayApiPreference {
     // TODO: Add Support for x11 gl
-    #[cfg(all(gles_egl_backend, gles_glx_backend))]
+    #[cfg(feature = "x11")]
     let preference = glutin::display::DisplayApiPreference::GlxThenEgl(alloc::boxed::Box::new(|_| {}));
-    #[cfg(all(gles_glx_backend, not(gles_egl_backend)))]
-    let preference = glutin::display::DisplayApiPreference::Glx;
-    #[cfg(all(gles_egl_backend, not(gles_glx_backend)))]
+    // #[cfg(all(gles_glx_backend, not(gles_egl_backend)))]
+    // let preference = glutin::display::DisplayApiPreference::Glx;
+    #[cfg(not(feature = "x11"))]
     let preference = glutin::display::DisplayApiPreference::Egl;
 
     preference
