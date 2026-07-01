@@ -1556,6 +1556,8 @@ impl Queue {
             Ok(closures)
         };
 
+        profiling::scope!("callbacks");
+
         let callbacks = match res {
             Ok(ok) => ok,
             Err(e) => return Err((submit_index, e)),
@@ -1597,6 +1599,8 @@ impl Queue {
         &'a self,
         snatch_guard: SnatchGuard<'a>,
     ) -> Result<PendingSubmission<'a>, (SubmissionIndex, DeviceError)> {
+        profiling::scope!("Queue::allocate_submission");
+
         let mut command_index_guard = self.device.command_indices.write();
         command_index_guard.active_submission_index += 1;
         let index = command_index_guard.active_submission_index;
