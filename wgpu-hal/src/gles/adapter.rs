@@ -481,6 +481,7 @@ impl super::Adapter {
             };
 
         let mut features = wgt::Features::empty()
+            | wgt::Features::MAPPABLE_PRIMARY_BUFFERS
             | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgt::Features::CLEAR_TEXTURE
             | wgt::Features::IMMEDIATES
@@ -1367,11 +1368,7 @@ impl crate::Adapter for super::Adapter {
 
             Some(crate::SurfaceCapabilities {
                 formats,
-                present_modes: if cfg!(windows) {
-                    vec![wgt::PresentMode::Fifo, wgt::PresentMode::Immediate]
-                } else {
-                    vec![wgt::PresentMode::Fifo] //TODO
-                },
+                present_modes: vec![wgt::PresentMode::Fifo, wgt::PresentMode::Immediate],
                 composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque], //TODO
                 maximum_frame_latency: 2..=2, //TODO, unused currently
                 current_extent: None,

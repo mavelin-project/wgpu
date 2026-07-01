@@ -644,6 +644,22 @@ impl crate::Surface for Surface {
                     unsafe { NonZeroU32::new_unchecked(config.extent.height) },
                 );
 
+                match config.present_mode {
+                    wgt::PresentMode::Fifo => sc_surface
+                        .set_swap_interval(
+                            gl.inner.context.current_context.as_ref().unwrap(),
+                            glutin::surface::SwapInterval::Wait(NonZeroU32::new(1).unwrap()),
+                        )
+                        .unwrap(),
+                    wgt::PresentMode::Immediate => sc_surface
+                        .set_swap_interval(
+                            gl.inner.context.current_context.as_ref().unwrap(),
+                            glutin::surface::SwapInterval::DontWait,
+                        )
+                        .unwrap(),
+                    _ => (),
+                }
+
                 self.create_swapchain(device, config, gl)
                     .map(|sc_inner| Swapchain::Other(sc_surface, sc_inner))?
             }
@@ -662,6 +678,22 @@ impl crate::Surface for Surface {
                     unsafe { NonZeroU32::new_unchecked(config.extent.height) },
                 );
 
+                match config.present_mode {
+                    wgt::PresentMode::Fifo => parent_surface
+                        .set_swap_interval(
+                            gl.inner.context.current_context.as_ref().unwrap(),
+                            glutin::surface::SwapInterval::Wait(NonZeroU32::new(1).unwrap()),
+                        )
+                        .unwrap(),
+                    wgt::PresentMode::Immediate => parent_surface
+                        .set_swap_interval(
+                            gl.inner.context.current_context.as_ref().unwrap(),
+                            glutin::surface::SwapInterval::DontWait,
+                        )
+                        .unwrap(),
+                    _ => (),
+                }
+
                 self.create_swapchain(device, config, gl)
                     .map(Swapchain::Parent)?
             }
@@ -674,6 +706,22 @@ impl crate::Surface for Surface {
                         unsafe { NonZeroU32::new_unchecked(config.extent.width) },
                         unsafe { NonZeroU32::new_unchecked(config.extent.height) },
                     );
+
+                    match config.present_mode {
+                        wgt::PresentMode::Fifo => surface
+                            .set_swap_interval(
+                                gl.inner.context.current_context.as_ref().unwrap(),
+                                glutin::surface::SwapInterval::Wait(NonZeroU32::new(1).unwrap()),
+                            )
+                            .unwrap(),
+                        wgt::PresentMode::Immediate => surface
+                            .set_swap_interval(
+                                gl.inner.context.current_context.as_ref().unwrap(),
+                                glutin::surface::SwapInterval::DontWait,
+                            )
+                            .unwrap(),
+                        _ => (),
+                    }
                 } else {
                     return Err(crate::SurfaceError::Other(
                         "Parent surface is not available for swapchain configuration",
@@ -710,6 +758,22 @@ impl crate::Surface for Surface {
                             "Failed to lock adapter context for swapchain configuration",
                         )
                     })?;
+
+                match config.present_mode {
+                    wgt::PresentMode::Fifo => surface
+                        .set_swap_interval(
+                            gl.inner.context.current_context.as_ref().unwrap(),
+                            glutin::surface::SwapInterval::Wait(NonZeroU32::new(1).unwrap()),
+                        )
+                        .unwrap(),
+                    wgt::PresentMode::Immediate => surface
+                        .set_swap_interval(
+                            gl.inner.context.current_context.as_ref().unwrap(),
+                            glutin::surface::SwapInterval::DontWait,
+                        )
+                        .unwrap(),
+                    _ => (),
+                }
 
                 self.create_swapchain(device, config, gl)
                     .map(|sc_inner| Swapchain::Other(surface, sc_inner))?
