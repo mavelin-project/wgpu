@@ -1526,7 +1526,11 @@ impl Queue {
                 }
             }
 
-            let pending_writes = self.pending_writes.lock();
+            let pending_writes = {
+                profiling::scope!("pending writes lock");
+
+                self.pending_writes.lock()
+            };
 
             let SubmissionResult { snatch_guard } = match submission.submit(pending_writes) {
                 Ok(result) => result,
@@ -1641,6 +1645,8 @@ impl Queue {
         mut pending_writes: MutexGuard<'_, PendingWrites>,
         prepared: PendingSubmission<'a>,
     ) -> Result<SubmissionResult<'a>, DeviceError> {
+        profiling::scope!("Queue::submit_pending_submission");
+
         let PendingSubmission {
             queue: _,
             snatch_guard,
