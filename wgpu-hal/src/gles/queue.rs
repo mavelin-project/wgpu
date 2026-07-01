@@ -269,17 +269,25 @@ impl super::Queue {
                     unsafe { gl.uniform_1_u32(first_instance_location.as_ref(), first_instance) };
 
                     if base_vertex == 0 {
-                        unsafe {
-                            // Don't use `gl.draw_elements`/`gl.draw_elements_base_vertex` for `instance_count == 1`.
-                            // Angle has a bug where it doesn't consider the instance divisor when `DYNAMIC_DRAW` is used in `gl.draw_elements`/`gl.draw_elements_base_vertex`.
-                            // See https://github.com/gfx-rs/wgpu/issues/3578
-                            gl.draw_elements_instanced(
-                                topology,
-                                index_count as i32,
-                                index_type,
-                                index_offset as i32,
-                                instance_count as i32,
-                            )
+                        if instance_count == 1 {
+                            unsafe {
+                                gl.draw_elements(
+                                    topology,
+                                    index_count as i32,
+                                    index_type,
+                                    index_offset as i32,
+                                )
+                            }
+                        } else {
+                            unsafe {
+                                gl.draw_elements_instanced(
+                                    topology,
+                                    index_count as i32,
+                                    index_type,
+                                    index_offset as i32,
+                                    instance_count as i32,
+                                )
+                            }
                         }
                     } else {
                         // If we've gotten here, wgpu-core has already validated that this function exists via the DownlevelFlags::BASE_VERTEX feature.

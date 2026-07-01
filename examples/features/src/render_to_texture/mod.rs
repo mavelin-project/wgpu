@@ -27,7 +27,7 @@ async fn run(_path: Option<String>) {
         // if !adapter_features.contains(required_features) {
         //     continue;
         // } else {
-            chosen_adapter = Some(adapter);
+        chosen_adapter = Some(adapter);
         //     break;
         // }
     }
@@ -38,18 +38,18 @@ async fn run(_path: Option<String>) {
             label: None,
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
-                    max_compute_workgroup_size_x: 0,
-                    max_compute_workgroup_size_y: 0,
-                    max_compute_workgroup_size_z: 0,
-                    max_compute_workgroups_per_dimension: 0,
-                    max_compute_invocations_per_workgroup: 0,
-                    max_compute_workgroup_storage_size: 0,
-                    max_storage_buffer_binding_size: 0,
-                    max_storage_buffers_per_shader_stage: 0,
-                    max_storage_textures_per_shader_stage: 0,
-                    max_dynamic_storage_buffers_per_pipeline_layout: 0,
-                    ..wgpu::Limits::downlevel_defaults()
-                },
+                max_compute_workgroup_size_x: 0,
+                max_compute_workgroup_size_y: 0,
+                max_compute_workgroup_size_z: 0,
+                max_compute_workgroups_per_dimension: 0,
+                max_compute_invocations_per_workgroup: 0,
+                max_compute_workgroup_storage_size: 0,
+                max_storage_buffer_binding_size: 0,
+                max_storage_buffers_per_shader_stage: 0,
+                max_storage_textures_per_shader_stage: 0,
+                max_dynamic_storage_buffers_per_pipeline_layout: 0,
+                ..wgpu::Limits::downlevel_defaults()
+            },
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,

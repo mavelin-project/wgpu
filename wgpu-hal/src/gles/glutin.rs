@@ -53,13 +53,13 @@ impl GlutinContext {
         };
 
         match raw_context {
-	    #[cfg(not(macos_platform))]
+            #[cfg(not(macos_platform))]
             glutin::context::RawContext::Egl(ctx) => ctx as *mut ffi::c_void,
-	    #[cfg(all(feature = "x11", not(macos_platform), not(windows)))]
+            #[cfg(all(feature = "x11", not(macos_platform), not(windows)))]
             glutin::context::RawContext::Glx(ctx) => ctx as *mut ffi::c_void,
             #[cfg(windows)]
             glutin::context::RawContext::Wgl(ctx) => ctx as *mut ffi::c_void,
-	    #[cfg(macos_platform)]
+            #[cfg(macos_platform)]
             glutin::context::RawContext::Cgl(ctx) => ctx as *mut ffi::c_void,
         }
     }
@@ -192,7 +192,8 @@ fn preference_default(
 ) -> glutin::display::DisplayApiPreference {
     // TODO: Add Support for x11 gl
     #[cfg(feature = "x11")]
-    let preference = glutin::display::DisplayApiPreference::GlxThenEgl(alloc::boxed::Box::new(|_| {}));
+    let preference =
+        glutin::display::DisplayApiPreference::GlxThenEgl(alloc::boxed::Box::new(|_| {}));
     // #[cfg(all(gles_glx_backend, not(gles_egl_backend)))]
     // let preference = glutin::display::DisplayApiPreference::Glx;
     #[cfg(not(feature = "x11"))]
@@ -321,7 +322,9 @@ impl crate::Instance for Instance {
         })?;
         let mut gl = unsafe {
             glow::Context::from_loader_function(|name| {
-                display.get_proc_address(ffi::CStr::from_bytes_with_nul_unchecked(name.as_bytes())).cast()
+                display
+                    .get_proc_address(ffi::CStr::from_bytes_with_nul_unchecked(name.as_bytes()))
+                    .cast()
             })
         };
 
